@@ -11,9 +11,7 @@
   ],
   "media_type": "all",
   "date_preset": "last_30_days",
-  "keywords": [
-    "python backend developer"
-  ],
+  "keywords": [],
   "ad_age_hours": "720",
   "delivered_to_regions": [
     "ALL"
@@ -27,7 +25,35 @@
   },
   "run_mode": "generate",
   "regions": "ALL",
-  "cycles": 1,
+  "cycles": 3,
   "run_until_complete": false,
-  "ad_age": 720
+  "ad_age": 720,
+  "last_keywords": [
+    "AI engineer remote",
+    "LLM engineer intermediate",
+    "AI automation developer",
+    "conversational AI developer",
+    "AI agent developer remote",
+    "prompt engineer backend",
+    "AI integration engineer",
+    "Python backend developer remote",
+    "FastAPI developer remote",
+    "backend engineer intermediate Python",
+    "Python automation engineer",
+    "REST API developer Python",
+    "full stack developer React Next.js remote",
+    "full stack AI developer remote",
+    "Next.js backend developer",
+    "React Python developer remote",
+    "automation engineer remote",
+    "browser automation developer",
+    "workflow automation engineer",
+    "web scraping developer remote",
+    "backend developer PostgreSQL remote",
+    "API developer intermediate remote",
+    "system architecture developer remote",
+    "remote software engineer intermediate",
+    "junior to mid backend developer remote",
+    "remote Python developer international"
+  ]
 }

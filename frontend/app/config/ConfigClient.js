@@ -127,7 +127,21 @@ export default function ConfigClient() {
       const runId = data.run_id || data.id;
       if (!runId) throw new Error('The server did not return a run id.');
 
-      persistSelection(payload);
+      // Starting a run must not erase the keywords we offer back next time.
+      // In AI mode the keyword box is legitimately empty, so keep the previous
+      // set under `last_keywords` unless this run actually had keywords.
+      const previous = selectionRef.current || {};
+      const storedLast = Array.isArray(previous.last_keywords)
+        ? previous.last_keywords
+        : Array.isArray(previous.keywords)
+          ? previous.keywords
+          : [];
+
+      persistSelection({
+        ...payload,
+        last_keywords: payload.keywords?.length ? payload.keywords : storedLast,
+      });
+
       router.push(`/runs/${runId}`);
     } catch (error) {
       console.error('Start failed:', error);

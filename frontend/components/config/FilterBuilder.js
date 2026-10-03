@@ -236,15 +236,19 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
     };
   }, [initialData]);
 
-  // The previous run's keywords, kept for the opt-in checkbox only.
+  // The previous run's keywords, kept for the opt-in checkbox only. These live
+  // under their own `last_keywords` key so that starting a run with an empty
+  // keyword box cannot erase them.
   const lastKeywords = useMemo(() => {
-    const raw = Array.isArray(initialData?.keywords)
-      ? initialData.keywords
-      : initialData?.keywords
-        ? [initialData.keywords]
-        : [];
+    const stored = Array.isArray(initialData?.last_keywords)
+      ? initialData.last_keywords
+      : Array.isArray(initialData?.keywords)
+        ? initialData.keywords
+        : initialData?.keywords
+          ? [initialData.keywords]
+          : [];
     const seen = new Set();
-    return raw.reduce((list, value) => {
+    return stored.reduce((list, value) => {
       const keyword = String(value ?? '').trim().replace(/\s+/g, ' ');
       if (!keyword) return list;
       const key = keyword.toLowerCase();
