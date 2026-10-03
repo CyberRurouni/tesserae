@@ -1,0 +1,33 @@
+{
+  "category": "career_jobs",
+  "delivery_status": "active",
+  "platforms": [
+    "facebook",
+    "instagram",
+    "messenger",
+    "audience_network",
+    "whatsapp",
+    "threads"
+  ],
+  "media_type": "all",
+  "date_preset": "last_30_days",
+  "keywords": [
+    "python backend developer"
+  ],
+  "ad_age_hours": "720",
+  "delivered_to_regions": [
+    "ALL"
+  ],
+  "languages": "en",
+  "sort_order": "relevance",
+  "heuristic_patterns": {
+    "require_ad_text_patterns": [],
+    "require_any_ad_text_patterns": [],
+    "exclude_ad_text_patterns": []
+  },
+  "run_mode": "generate",
+  "regions": "ALL",
+  "cycles": 1,
+  "run_until_complete": false,
+  "ad_age": 720
+}

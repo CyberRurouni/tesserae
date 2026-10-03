@@ -1,0 +1,12 @@
+# Tesserae — AI-Driven Ad Prospecting Automation
+
+playwright>=1.49
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pydantic>=2.9
+redis>=5.2
+circuitbreaker>=2.0
+google-genai>=0.8
+python-dotenv>=1.0
+openpyxl>=3.1
+pandas>=2.2

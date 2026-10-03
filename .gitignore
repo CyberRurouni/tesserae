@@ -1,0 +1,46 @@
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.p12
+credentials.json
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+next-env.d.ts
+
+# Browser automation profile — 1.3GB Chromium user data, contains
+# session cookies and login state. Never commit this.
+browser_profile/
+
+# Runtime data — regenerate by running a search
+data/
+exports/
+dump.rdb
+
+# Logs and local artifacts
+*.log
+api.log
+backend.log
+debug/
+test_export.xlsx
+*.xlsx
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/

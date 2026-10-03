@@ -1,0 +1,119 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 240 33% 98%;
+    --foreground: 230 40% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 230 40% 12%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 230 40% 12%;
+    --primary: 258 88% 62%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 30% 94%;
+    --secondary-foreground: 230 40% 14%;
+    --muted: 240 28% 95%;
+    --muted-foreground: 232 14% 44%;
+    --accent: 258 88% 62%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 152 62% 38%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 50%;
+    --warning-foreground: 30 60% 12%;
+    --info: 199 89% 52%;
+    --info-foreground: 200 90% 8%;
+    --border: 240 24% 88%;
+    --input: 240 24% 88%;
+    --ring: 258 88% 62%;
+    --glow: 199 89% 52%;
+    --radius: 0.9rem;
+  }
+
+  .dark {
+    --background: 232 42% 6%;
+    --foreground: 225 30% 96%;
+    --card: 232 34% 10%;
+    --card-foreground: 225 30% 96%;
+    --popover: 232 34% 10%;
+    --popover-foreground: 225 30% 96%;
+    --primary: 258 92% 72%;
+    --primary-foreground: 240 60% 10%;
+    --secondary: 233 26% 16%;
+    --secondary-foreground: 225 30% 94%;
+    --muted: 233 24% 15%;
+    --muted-foreground: 227 18% 68%;
+    --accent: 258 92% 72%;
+    --accent-foreground: 240 60% 10%;
+    --destructive: 0 72% 58%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 152 58% 48%;
+    --success-foreground: 152 80% 8%;
+    --warning: 38 94% 58%;
+    --warning-foreground: 38 80% 10%;
+    --info: 199 89% 56%;
+    --info-foreground: 200 90% 8%;
+    --border: 233 22% 20%;
+    --input: 233 22% 20%;
+    --ring: 258 92% 72%;
+    --glow: 199 89% 56%;
+  }
+}
+
+@layer base {
+  * {
+    border-color: hsl(var(--border));
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    background-image:
+      radial-gradient(58rem 32rem at 12% -10%, hsl(var(--primary) / 0.18), transparent 60%),
+      radial-gradient(46rem 28rem at 92% 0%, hsl(var(--glow) / 0.14), transparent 62%);
+    background-attachment: fixed;
+    min-height: 100vh;
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.35);
+    color: hsl(var(--foreground));
+  }
+
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-2xl border border-border/70 bg-card/80 shadow-panel backdrop-blur-sm;
+  }
+
+  .panel-title {
+    @apply text-base font-semibold tracking-tight text-foreground;
+  }
+
+  .eyebrow {
+    @apply text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground;
+  }
+}
+
+@layer utilities {
+  .text-gradient {
+    @apply bg-gradient-to-r from-primary via-primary to-glow bg-clip-text text-transparent;
+  }
+
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border)) transparent;
+  }
+}
