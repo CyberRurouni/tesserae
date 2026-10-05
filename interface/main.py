@@ -23,6 +23,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
+from interface.families_api import router as families_router
 from interface.orchestrate import _run_with_filters
 from interface.select_filters import build_scraping_filters
 
@@ -181,6 +182,9 @@ def _keyword_targets(request: RunRequest) -> int:
     if request.run_until_complete:
         return 0
     return max(1, request.cycles or 1)
+
+
+app.include_router(families_router)
 
 
 # ── Run lifecycle ──────────────────────────────────────────────────────────

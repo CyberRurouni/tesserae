@@ -43,7 +43,9 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 # 🔹 STORAGE (JSON files — the primary store, no database)
 # ============================================================================
 
-DATA_DIR = BASE_DIR / "data"
+# Overridable so tests — and anyone running a second instance — never have to
+# write into the real data directory. Everything below derives from this.
+DATA_DIR = Path(os.getenv("TESSERAE_DATA_DIR") or (BASE_DIR / "data")).resolve()
 ADS_DIR = DATA_DIR / "ads"                # fetched ads, per category
 KEYWORDS_DIR = DATA_DIR / "keywords"      # keyword history / batches
 COVERAGE_DIR = DATA_DIR / "coverage"      # persisted exclusion prompts

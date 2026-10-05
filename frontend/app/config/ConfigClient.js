@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/Button';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
 import ProfileForm from '@/components/config/ProfileForm';
 import FilterBuilder, { INITIAL_RUN_MODE } from '@/components/config/FilterBuilder';
+import { Nav } from '@/components/Nav';
 
 function Skeleton() {
   return (
@@ -152,8 +153,9 @@ export default function ConfigClient() {
   if (loading) return <Skeleton />;
 
   return (
-    <main className="min-h-screen bg-background p-6 md:p-8">
-      <div className="mx-auto max-w-7xl space-y-8">
+    <main className="min-h-screen bg-background">
+      <Nav />
+      <div className="mx-auto max-w-7xl space-y-8 p-6 md:p-8">
         <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div className="space-y-2">
             <p className="eyebrow">Step 1 of 2</p>
