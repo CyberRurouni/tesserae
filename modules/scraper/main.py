@@ -36,6 +36,23 @@ from .search import (
 
 logger = logging.getLogger(__name__)
 
+
+def renew_deferral(family_id: str | None, ad_id: str) -> bool:
+    """
+    Extend a deferred ad's TTL when we pass over it.
+
+    A deferred ad met again under the SAME request is not re-judged — the
+    request has not changed, so nothing about it has changed. Renewing here is
+    what keeps it alive in the not-now bucket instead of quietly ageing out.
+    Imported lazily so the scraper city does not depend on the family package
+    at import time.
+    """
+    if not family_id:
+        return False
+    from modules.families.deferred import renew
+
+    return renew(family_id, ad_id)
+
 # Verdict key pattern in Redis DB 1 — first writer wins, and the key is
 # CATEGORY+PROFILE-SCOPED: a verdict is about an ad UNDER A LENS + PROFILE,
 # so profile changes automatically get a fresh key space.
@@ -156,6 +173,7 @@ async def run_scrape(
     context: BrowserContext | None = None,
     run_seen_ids: RunSeenIds | None = None,
     family_id: str | None = None,
+    request_family_id: str | None = None,
 ) -> list[AdRecord]:
     """
     Full scrape pass: for each keyword, search the library, extract ads,
@@ -196,9 +214,11 @@ async def run_scrape(
         logger.warning("⚠️ No family for this run — only within-pass dedup is active")
 
     if context is not None:
-        return await _scrape_on(context, filters, category, cat_id, run_seen, verdict_index)
+        return await _scrape_on(context, filters, category, cat_id, run_seen,
+                                 verdict_index, family_id, request_family_id)
     async with browser_session(headless=headless) as owned:
-        return await _scrape_on(owned, filters, category, cat_id, run_seen, verdict_index)
+        return await _scrape_on(owned, filters, category, cat_id, run_seen,
+                                verdict_index, family_id, request_family_id)
 
 
 async def _scrape_on(
@@ -208,6 +228,8 @@ async def _scrape_on(
     cat_id: str,
     run_seen: RunSeenIds,
     verdict_index=None,
+    family_id: str | None = None,
+    request_family_id: str | None = None,
 ) -> list[AdRecord]:
     """The keyword loop on an existing context. Owns only its page."""
     fresh: list[AdRecord] = []
@@ -334,15 +356,24 @@ async def _scrape_on(
                 # (A Meta empty state is a KNOWN condition, not a bug — no dump.)
                 await collect_page_html(page, tag=f"no_cards_{keyword.replace(' ', '_')}")
 
-            already_final = heuristic_passed = 0
+            already_final = heuristic_passed = deferred_renewed = 0
             fresh_before = len(fresh)
             for ad in keyword_ads:
                 # In-memory check — the mirror already contains everything
                 # judged for this family, everything recorded earlier in this
-                # run, and every ancestor's verdicts.
-                if seen_index is not None and seen_index.has(ad.ad_archive_id):
-                    already_final += 1
-                    continue
+                # run, and every ancestor's verdicts. `skip` is request-aware:
+                # a deferred ad comes back for judgement when the request
+                # family changes, and is only passed over when it has not.
+                if seen_index is not None:
+                    skip, why = seen_index.skip(ad.ad_archive_id, request_family_id)
+                    if skip:
+                        already_final += 1
+                        if why == "deferred":
+                            # Passing over a deferred ad renews it — the whole
+                            # cost of not re-judging it under an unchanged request.
+                            if renew_deferral(family_id, ad.ad_archive_id):
+                                deferred_renewed += 1
+                        continue
                 if run_seen.has(ad.ad_archive_id) and run_seen.shared:
                     # Another worker on this run already took it.
                     already_final += 1
@@ -354,11 +385,12 @@ async def _scrape_on(
                 fresh.append(ad)
 
             logger.info(
-                "🧺 Keyword %r: %d unique harvested (%d new this keyword) — %d already final, %d passed heuristics -> %d to AI (total: %d)",
+                "🧺 Keyword %r: %d unique harvested (%d new this keyword) — %d already judged%s, %d passed heuristics -> %d to AI (total: %d)",
                 keyword,
                 len(seen_ids),
                 len(seen_ids) - keyword_start_unique,
                 already_final,
+                f" ({deferred_renewed} deferrals renewed)" if deferred_renewed else "",
                 heuristic_passed,
                 len(fresh) - fresh_before,
                 len(fresh),

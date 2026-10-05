@@ -198,7 +198,7 @@ export default function ConfigClient() {
             {[
               { step: '1', title: 'Ads are collected', body: 'Tesserae reads the Meta Ad Library for every keyword across your chosen platforms.' },
               { step: '2', title: 'AI judges each ad', body: 'Each ad is scored against your profile so only genuinely relevant ones survive.' },
-              { step: '3', title: 'You export results', body: 'Review the accepted ads and download them as a single Excel sheet.' },
+              { step: '3', title: 'You review the results', body: 'Accepted leads are kept per profile. Ads that fit you but are off-request right now are held for later instead of being thrown away.' },
             ].map((item) => (
               <div key={item.step} className="space-y-1.5">
                 <span className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/15 text-xs font-bold text-primary">

@@ -51,12 +51,17 @@ def record_verdict(
     outcome: str,
     reason: str = "",
     ad_category: str = "",
+    request_family_id: str | None = None,
 ) -> None:
     """
     Store one ad's outcome for a family.
 
     A hash keyed by ad_id, so re-judging the same ad overwrites rather than
     accumulating — the exact defect in the old append-only store.
+
+    `request_family_id` records WHICH request produced a deferral. Without it a
+    deferred ad would look permanently decided and the new-request-family path
+    would never come back to it.
     """
     if outcome not in OUTCOMES:
         raise ValueError(f"outcome must be one of {OUTCOMES}, got {outcome!r}")
@@ -66,8 +71,15 @@ def record_verdict(
         run_state_broker.hset,
         _key(category, family_id),
         ad_id,
-        json.dumps({"outcome": outcome, "reason": reason, "ad_category": ad_category},
-                   ensure_ascii=False),
+        json.dumps(
+            {
+                "outcome": outcome,
+                "reason": reason,
+                "ad_category": ad_category,
+                "request_family_id": request_family_id,
+            },
+            ensure_ascii=False,
+        ),
     )
     safe_redis_operation(run_state_broker.expire, _key(category, family_id), VERDICT_TTL_SECONDS)
 
@@ -117,19 +129,42 @@ def verdicts_for(category: str, family_id: str, outcome: str) -> set[str]:
     }
 
 
-def has_verdict(category: str, family_id: str, ad_id: str) -> bool:
+def should_skip(
+    category: str,
+    family_id: str,
+    ad_id: str,
+    request_family_id: str | None = None,
+) -> tuple[bool, str]:
     """
-    The hot path — one lookup, called per scraped card.
+    Should this ad be skipped? Returns (skip?, outcome).
 
-    Own verdict first, then ancestors. Returns a bool so callers can skip; use
-    get_verdict() when the outcome itself matters.
+    The hot path, called per scraped card. A DEFERRED ad is skipped only while
+    the SAME request family is in force — the caller is expected to renew its
+    TTL on the way past. Under a different request family it must be judged
+    again, because the thing that deferred it may now be wanted.
     """
-    if safe_redis_operation(run_state_broker.hexists, _key(category, family_id), ad_id):
-        return True
-    for ancestor in store.ancestry(family_id):
-        if safe_redis_operation(run_state_broker.hexists, _key(category, ancestor), ad_id):
-            return True
-    return False
+    record = get_verdict(category, family_id, ad_id)
+    if record is None:
+        for ancestor in store.ancestry(family_id):
+            record = get_verdict(category, ancestor, ad_id)
+            if record is not None:
+                break
+    if record is None:
+        return False, "new"
+
+    outcome = record.get("outcome")
+    if outcome == "deferred" and request_family_id:
+        if record.get("request_family_id") != request_family_id:
+            return False, "deferred_under_another_request"
+    return True, outcome or "rejected"
+
+
+def has_verdict(category: str, family_id: str, ad_id: str) -> bool:
+    """True when a verdict exists under this family or an ancestor."""
+    return get_verdict(category, family_id, ad_id) is not None or any(
+        get_verdict(category, ancestor, ad_id) is not None
+        for ancestor in store.ancestry(family_id)
+    )
 
 
 def known_ids(category: str, family_id: str) -> set[str]:

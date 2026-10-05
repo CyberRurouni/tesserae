@@ -325,6 +325,12 @@ async def _search_and_judge(
         batch_size=config.judge_batch_size,
         max_concurrent=config.judge_max_concurrent,
         additional_filters=additional_filters or None,
+        # The judge reasons in two stages and needs BOTH: about-you defines the
+        # family (accept vs reject), the additional request only decides
+        # accept vs defer. Without about-you every off-request ad would look
+        # like trash instead of something worth keeping.
+        profile_text=config.profile.background,
+        request_family_id=config.request_family_id,
     )
     summary = record_results(
         ads, verdicts, config.filters.category, config.filters,

@@ -55,6 +55,28 @@ class FamilyVerdictIndex:
         record = verdicts.get_verdict(self.category, self.family_id, ad_id)
         return record.get("outcome") if record else None
 
+    def skip(self, ad_id: str, request_family_id: str | None = None) -> tuple[bool, str]:
+        """
+        Should the scraper skip this card, and why not if it shouldn't.
+
+        A card already carrying a verdict normally costs nothing more. The one
+        exception is a DEFERRED ad under a different request family: it has to
+        go back to the model, because the request that parked it may now cover
+        it. The mirror answers from memory; only that rare case falls through
+        to Redis.
+        """
+        if not self.has(ad_id):
+            return False, "new"
+        record = verdicts.get_verdict(self.category, self.family_id, ad_id)
+        outcome = (record or {}).get("outcome")
+        if outcome != "deferred":
+            return True, outcome or "rejected"
+        if not request_family_id:
+            return True, "deferred"
+        if (record or {}).get("request_family_id") == request_family_id:
+            return True, "deferred"
+        return False, "deferred_under_another_request"
+
     def __contains__(self, ad_id: str) -> bool:
         return self.has(ad_id)
 
@@ -67,8 +89,18 @@ class FamilyVerdictIndex:
         return verdicts.stats(self.category, self.family_id)
 
     # ── writes ─────────────────────────────────────────────────────────────
-    def record(self, ad_id: str, outcome: str, reason: str = "", ad_category: str = "") -> None:
-        verdicts.record_verdict(self.category, self.family_id, ad_id, outcome, reason, ad_category)
+    def record(
+        self,
+        ad_id: str,
+        outcome: str,
+        reason: str = "",
+        ad_category: str = "",
+        request_family_id: str | None = None,
+    ) -> None:
+        verdicts.record_verdict(
+            self.category, self.family_id, ad_id, outcome, reason, ad_category,
+            request_family_id,
+        )
         self._known.add(ad_id)
 
 

@@ -26,6 +26,7 @@ function listSavedRuns() {
         const accepted = Array.isArray(data.accepted) ? data.accepted : [];
         const rejected = Array.isArray(data.judged_rejected) ? data.judged_rejected : [];
         const aiFailed = Array.isArray(data.ai_failed) ? data.ai_failed : [];
+        const deferred = Array.isArray(data.deferred) ? data.deferred : [];
 
         runs.push({
           id: file.replace(/\.json$/, ''),
@@ -45,7 +46,12 @@ function listSavedRuns() {
             status: 'completed',
           }),
           started_at: data.recorded_at || null,
-          counts: { accepted: accepted.length, rejected: rejected.length, ai_failed: aiFailed.length },
+          counts: {
+            accepted: accepted.length,
+            deferred: deferred.length,
+            rejected: rejected.length,
+            ai_failed: aiFailed.length,
+          },
         });
       } catch (error) {
         console.error(`Error parsing ${file}:`, error);

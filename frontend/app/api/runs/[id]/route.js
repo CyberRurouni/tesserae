@@ -23,6 +23,8 @@ function readRunFile(found) {
     return {
       accepted: Array.isArray(parsed.accepted) ? parsed.accepted : [],
       judgedRejected: Array.isArray(parsed.judged_rejected) ? parsed.judged_rejected : [],
+      // Absent in run files written before the not-now bucket existed.
+      deferred: Array.isArray(parsed.deferred) ? parsed.deferred : [],
       aiFailed: Array.isArray(parsed.ai_failed) ? parsed.ai_failed : [],
       fileKeywords: Array.isArray(parsed.keywords) ? parsed.keywords : [],
       recordedAt: parsed.recorded_at || null,
@@ -33,6 +35,7 @@ function readRunFile(found) {
       accepted: [],
       judgedRejected: [],
       aiFailed: [],
+      deferred: [],
       fileKeywords: [],
       recordedAt: null,
     };
@@ -64,9 +67,9 @@ export async function GET(request, { params }) {
 
     const saved = found
       ? readRunFile(found)
-      : { accepted: [], judgedRejected: [], aiFailed: [], fileKeywords: [], recordedAt: null };
+      : { accepted: [], judgedRejected: [], aiFailed: [], deferred: [], fileKeywords: [], recordedAt: null };
 
-    const { accepted, judgedRejected, aiFailed } = saved;
+    const { accepted, judgedRejected, aiFailed, deferred } = saved;
 
     // A saved result file means the run is over, whatever the backend says.
     const status = live?.status || (found ? 'completed' : 'pending');
@@ -102,8 +105,10 @@ export async function GET(request, { params }) {
       accepted,
       judged_rejected: judgedRejected,
       ai_failed: aiFailed,
+      deferred,
       counts: {
         accepted: accepted.length,
+        deferred: deferred.length,
         rejected: judgedRejected.length,
         ai_failed: aiFailed.length,
       },

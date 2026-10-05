@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from core import ADS_DIR, AdRelevanceVerdict, AdRecord, PROFILE_HASH_TTL
 
 from modules.families.index import get_family_index
+from modules.families import deferred as deferred_store
 from modules.families import store as family_store
 from core import ScrapingFilters
 
@@ -43,6 +44,7 @@ def record_results(
     run_id: str | None = None,
     searched_keywords: list[str] | None = None,
     family_id: str | None = None,
+    request_family_id: str | None = None,
 ) -> dict:
     """
     Apply verdicts: mark + store + write the run files under
@@ -56,6 +58,7 @@ def record_results(
     """
 
     accepted: list[AdRecord] = []
+    deferred: list[dict] = []
     judged_rejects: list[dict] = []
     failed_ads: list[dict] = []
 
@@ -65,11 +68,16 @@ def record_results(
             **ad.model_dump(mode="json"),
             "relevance_reason": v.reason,
             "relevance_confidence": v.confidence,
+            "ad_category": v.ad_category,
         }
-        if v.relevant:
+        if v.outcome == "accepted":
             accepted.append(ad)
         elif v.ai_failed:
+            # A checkpoint failure is not a judgement. It goes to failed_ads so
+            # it is never recorded as final, and it stays eligible next run.
             failed_ads.append(entry)
+        elif v.outcome == "deferred":
+            deferred.append(entry)
         else:
             judged_rejects.append(entry)
 
@@ -91,10 +99,14 @@ def record_results(
             newly_marked += 1
         family_index.record(
             ad.ad_archive_id,
-            "accepted" if v.relevant else "rejected",
+            v.outcome,
             reason=v.reason,
-            ad_category=ad.category or "",
+            ad_category=v.ad_category or ad.category or "",
+            request_family_id=v.request_family_id or request_family_id,
         )
+        # Accepted leaves the not-now bucket for good.
+        if v.outcome == "accepted":
+            deferred_store.resolve(family_id, ad.ad_archive_id)
 
     cat_dir = ADS_DIR / category_id
     cat_dir.mkdir(parents=True, exist_ok=True)
@@ -110,12 +122,25 @@ def record_results(
         if added:
             logger.info("📥 Lead list for %s: %d new lead(s)", family_id, added)
 
+    # Deferred ads keep their FULL record so a later request family can
+    # re-judge them without re-scraping.
+    if family_id:
+        for entry in deferred:
+            deferred_store.defer_ad(
+                family_id, entry, request_family_id or "",
+                reason=entry.get("relevance_reason", ""),
+                ad_category=entry.get("ad_category", ""),
+            )
+        if deferred:
+            logger.info("⏸️  %d ad(s) deferred for %s", len(deferred), family_id)
+
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     run_path = cat_dir / (f"{run_id}.json" if run_id else f"run_{stamp}.json")
 
     accepted_entries = [ad.model_dump(mode="json") for ad in accepted]
     payload = {
         "accepted": accepted_entries,
+        "deferred": deferred,
         "judged_rejected": judged_rejects,
         "ai_failed": failed_ads,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
@@ -132,6 +157,9 @@ def record_results(
 
     if previous:
         payload["accepted"] = _merge_by_ad_id(previous.get("accepted") or [], accepted_entries)
+        # `previous.get(...) or []` keeps run files written before the deferred
+        # bucket existed readable — they simply have nothing in it.
+        payload["deferred"] = (previous.get("deferred") or []) + deferred
         payload["judged_rejected"] = (previous.get("judged_rejected") or []) + judged_rejects
         payload["ai_failed"] = (previous.get("ai_failed") or []) + failed_ads
         # recorded_at stays the run's start, not this cycle's write time
@@ -148,8 +176,9 @@ def record_results(
     run_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
 
     logger.info(
-        "🗄️ Verdicts recorded: %d accepted, %d judged-rejects, %d AI-failures (%d newly marked)",
-        len(accepted), len(judged_rejects), len(failed_ads), newly_marked,
+        "🗄️ Verdicts recorded: %d accepted, %d deferred, %d judged-rejects, "
+        "%d AI-failures (%d newly marked)",
+        len(accepted), len(deferred), len(judged_rejects), len(failed_ads), newly_marked,
     )
     return {
         "accepted": accepted,

@@ -22,6 +22,7 @@ function statusFromFile(id, found) {
   const accepted = Array.isArray(data.accepted) ? data.accepted : [];
   const judgedRejected = Array.isArray(data.judged_rejected) ? data.judged_rejected : [];
   const aiFailed = Array.isArray(data.ai_failed) ? data.ai_failed : [];
+  const deferred = Array.isArray(data.deferred) ? data.deferred : [];
 
   return {
     id,
@@ -29,12 +30,14 @@ function statusFromFile(id, found) {
     status: 'completed',
     progress: 100,
     current_keyword: null,
+    deferred,
     counts: {
       accepted: accepted.length,
+      deferred: deferred.length,
       rejected: judgedRejected.length,
       ai_failed: aiFailed.length,
     },
-    totalProcessed: accepted.length + judgedRejected.length + aiFailed.length,
+    totalProcessed: accepted.length + deferred.length + judgedRejected.length + aiFailed.length,
     accepted: accepted.length,
     rejected: judgedRejected.length,
     aiFailed: aiFailed.length,
@@ -109,12 +112,20 @@ export async function GET(request, { params }) {
           status,
           counts: {
             accepted: numericCount(backendCounts.accepted) ?? fromFile?.status.counts.accepted ?? 0,
+            deferred: numericCount(backendCounts.deferred) ?? fromFile?.status.counts.deferred ?? 0,
             rejected: numericCount(backendCounts.rejected) ?? fromFile?.status.counts.rejected ?? 0,
             ai_failed: numericCount(backendCounts.ai_failed) ?? fromFile?.status.counts.ai_failed ?? 0,
           },
           keywords,
           results_saved: Boolean(fromFile),
           terminal: isTerminalStatus(status),
+          // Always present, whichever branch answered. The live branch used to
+          // omit it, so a caller could not rely on the shape.
+          totalProcessed:
+            (numericCount(backendCounts.accepted) ?? fromFile?.status.counts.accepted ?? 0) +
+            (numericCount(backendCounts.deferred) ?? fromFile?.status.counts.deferred ?? 0) +
+            (numericCount(backendCounts.rejected) ?? fromFile?.status.counts.rejected ?? 0) +
+            (numericCount(backendCounts.ai_failed) ?? fromFile?.status.counts.ai_failed ?? 0),
         });
       }
 

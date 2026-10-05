@@ -8,7 +8,6 @@ Provides the REST API consumed by the Next.js frontend:
   - GET  /api/runs/{id}/status  lightweight polling endpoint
   - GET  /api/config            read profile + last filter selection
   - POST /api/config            write the profile files
-  - GET  /api/export/{id}       accepted results as .xlsx
 
 Run with:  python -m interface.main
 """
@@ -414,62 +413,6 @@ async def save_config(config: ConfigRequest):
         (PROFILE_DIR / "additional_filters.txt").write_text(config.additional_filters, encoding="utf-8")
 
     return {"status": "saved"}
-
-
-@app.get("/api/export/{run_id}")
-async def export_run(run_id: str):
-    """Accepted results for one run as a single-sheet .xlsx."""
-    import io
-
-    from fastapi.responses import StreamingResponse
-    from openpyxl import Workbook
-
-    run_file = _find_run_file(run_id)
-    if run_file is None:
-        raise HTTPException(404, "Run not found")
-
-    data = json.loads(run_file.read_text(encoding="utf-8"))
-
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "Accepted"
-    sheet.append(
-        [
-            "Ad Link",
-            "CTA Text",
-            "CTA URL",
-            "Keyword",
-            "Advertiser",
-            "Ad Text",
-            "Confidence",
-            "Reason",
-            "Fetched At",
-        ]
-    )
-
-    for ad in data.get("accepted", []) or []:
-        sheet.append(
-            [
-                ad.get("ad_archive_id", ""),
-                ad.get("cta_text", ""),
-                ad.get("cta_url", ""),
-                ad.get("source_keyword", ""),
-                ad.get("advertiser_name", ""),
-                str(ad.get("ad_text", ""))[:500],
-                ad.get("relevance_confidence", ""),
-                ad.get("relevance_reason", ""),
-                ad.get("fetched_at", ""),
-            ]
-        )
-
-    output = io.BytesIO()
-    workbook.save(output)
-
-    return StreamingResponse(
-        io.BytesIO(output.getvalue()),
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{run_id}.xlsx"'},
-    )
 
 
 def find_free_port(start_port: int = 8000, max_port: int = 9000) -> int:

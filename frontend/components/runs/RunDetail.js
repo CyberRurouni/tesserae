@@ -77,7 +77,6 @@ export function RunDetail({ runId }) {
   const [run, setRun] = useState(null);
   const [loading, setLoading] = useState(true);
   const [missing, setMissing] = useState(false);
-  const [exporting, setExporting] = useState(false);
   // The poll loop reads its bookkeeping from a ref, but `run`/`missing` are
   // render state, so the effect below re-evaluates after every poll.
   const pollRef = useRef(newPollState());
@@ -137,27 +136,6 @@ export function RunDetail({ runId }) {
     return () => clearInterval(timer);
   }, [fetchData, run, missing]);
 
-  const handleExport = async () => {
-    setExporting(true);
-    try {
-      const res = await fetch(`/api/export/${runId}`);
-      if (!res.ok) return;
-      const blob = await res.blob();
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${runId}.xlsx`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(url);
-    } catch (error) {
-      console.error('Export failed:', error);
-    } finally {
-      setExporting(false);
-    }
-  };
-
   const checkAgain = () => {
     pollRef.current = newPollState();
     setLoading(true);
@@ -205,10 +183,10 @@ export function RunDetail({ runId }) {
   const status = run.status || 'pending';
   const keywords = Array.isArray(run.keywords) ? run.keywords : [];
   const accepted = Array.isArray(run.accepted) ? run.accepted : [];
+  const deferred = Array.isArray(run.deferred) ? run.deferred : [];
   const rejectedCount = run.counts?.rejected ?? 0;
   const aiFailedCount = run.counts?.ai_failed ?? 0;
   const isLive = !isTerminalStatus(status);
-  const finished = status === 'completed';
   const resultsSaved = run.results_saved !== false;
   const keywordsWithAds = keywords.filter((entry) => (entry.accepted_count ?? 0) > 0).length;
 
@@ -222,6 +200,11 @@ export function RunDetail({ runId }) {
     emptyResults = {
       message: 'The search finished, but no results file was saved for it.',
       hint: 'Reloading may help if the results were written moments after the search ended.',
+    };
+  } else if (deferred.length > 0) {
+    emptyResults = {
+      message: 'Nothing accepted this time — but the right kind of ads showed up.',
+      hint: `${deferred.length} ad(s) fit your profile and are held for a request that asks for them.`,
     };
   } else if (keywordsWithAds > 0) {
     emptyResults = {
@@ -255,9 +238,6 @@ export function RunDetail({ runId }) {
             {isLive && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" aria-hidden="true" />}
             {STATUS_LABELS[status] || status}
           </span>
-          <Button onClick={handleExport} loading={exporting} disabled={!finished} variant="outline">
-            Download Excel
-          </Button>
         </div>
       </header>
 
@@ -286,8 +266,9 @@ export function RunDetail({ runId }) {
         </Card>
       )}
 
-      <div className="grid gap-4 md:grid-cols-3">
-        <Stat label="Accepted ads" value={accepted.length} tone="text-success" />
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <Stat label="Accepted" value={accepted.length} tone="text-success" />
+        <Stat label="Held for later" value={deferred.length} tone="text-info" />
         <Stat label="Rejected" value={rejectedCount} tone="text-muted-foreground" />
         <Stat label="Could not judge" value={aiFailedCount} tone="text-warning" />
       </div>
@@ -301,6 +282,36 @@ export function RunDetail({ runId }) {
             {keywords.map((entry) => (
               <KeywordChip key={entry.id || entry.keyword} entry={entry} />
             ))}
+          </CardContent>
+        </Card>
+      )}
+
+      {deferred.length > 0 && (
+        <Card className="border-info/30">
+          <CardHeader>
+            <CardTitle className="text-lg">Held for later ({deferred.length})</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-xs leading-relaxed text-muted-foreground">
+              These fit your profile but are not what you asked for this time. They are kept, not
+              thrown away — edit your request and they get reconsidered.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {deferred.map((ad, i) => (
+                <span
+                  key={ad.ad_archive_id || i}
+                  className="inline-flex max-w-full items-center gap-2 rounded-full border border-info/40 bg-info/10 px-3 py-1.5 text-xs text-foreground"
+                >
+                  <span className="max-w-[22rem] truncate">
+                    {ad.advertiser_name || 'Unnamed advertiser'}
+                  </span>
+                  {ad.ad_category && <span className="text-muted-foreground/80">· {ad.ad_category}</span>}
+                  {ad.relevance_reason && (
+                    <span className="italic text-muted-foreground/70">· {ad.relevance_reason}</span>
+                  )}
+                </span>
+              ))}
+            </div>
           </CardContent>
         </Card>
       )}
