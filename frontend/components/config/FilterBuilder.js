@@ -465,7 +465,7 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
               tag="Keywords optional"
               tagTone="optional"
               title="Let AI generate keywords for me"
-              description="Tesserae reads your About You and What Are You Looking For answers, then invents its own search keywords for you. Any keywords you added above are searched first and are combined with the AI ones — you can leave this box empty entirely."
+              description="Tesserae reads your profile and what you're currently looking for, then writes its own search keywords. Any keywords you added above are searched first and combined with the AI ones — you can leave this box empty entirely."
             />
             <ChoiceCard
               selected={formData.run_mode === 'existing'}

@@ -5,8 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/Button';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
-import ProfileForm from '@/components/config/ProfileForm';
-import FilterBuilder, { INITIAL_RUN_MODE } from '@/components/config/FilterBuilder';
+import FilterBuilder from '@/components/config/FilterBuilder';
 import { Nav } from '@/components/Nav';
 
 function Skeleton() {
@@ -26,9 +25,7 @@ function Skeleton() {
 
 export default function ConfigClient() {
   const router = useRouter();
-  const [profile, setProfile] = useState({ about_us: '', additional_filters: '' });
   const [lastSelection, setLastSelection] = useState(null);
-  const [runMode, setRunMode] = useState(INITIAL_RUN_MODE);
   const [loading, setLoading] = useState(true);
   const [startError, setStartError] = useState('');
   // Lets the toggle handler persist without re-creating the callback.
@@ -43,10 +40,6 @@ export default function ConfigClient() {
         if (!res.ok) throw new Error(`Config request failed with ${res.status}`);
         const data = await res.json();
         if (!active) return;
-        setProfile({
-          about_us: data.about_us ?? data.aboutUs ?? '',
-          additional_filters: data.additional_filters ?? data.additionalFilters ?? '',
-        });
         const saved = data.last_selection ?? data.lastSelection ?? null;
         const restored = saved && Object.keys(saved).length ? saved : null;
         selectionRef.current = restored;
@@ -55,7 +48,6 @@ export default function ConfigClient() {
         // Python CLI, which does not store run_mode — falling through to the
         // default here is what keeps the About You notice in sync with the
         // option FilterBuilder shows as selected.
-        setRunMode(restored?.run_mode ?? INITIAL_RUN_MODE);
       } catch (error) {
         console.error('Failed to load config:', error);
       } finally {
@@ -83,23 +75,9 @@ export default function ConfigClient() {
   // Remember the mode even when the user never starts a search, so the notice
   // and the selected option survive a reload.
   const handleRunModeChange = useCallback(
-    (nextMode) => {
-      setRunMode(nextMode);
-      persistSelection({ run_mode: nextMode });
-    },
+    (nextMode) => persistSelection({ run_mode: nextMode }),
     [persistSelection]
   );
-
-  const handleProfileSave = useCallback(async (data) => {
-    const res = await fetch('/api/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    });
-    if (!res.ok) throw new Error('Saving the profile failed. Please try again.');
-    // Deliberately not calling setProfile here: it would change the ProfileForm
-    // `key` and remount the form, wiping the "saved" confirmation.
-  }, []);
 
   const handleStart = useCallback(async (filters) => {
     setStartError('');
@@ -158,17 +136,20 @@ export default function ConfigClient() {
       <div className="mx-auto max-w-7xl space-y-8 p-6 md:p-8">
         <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
           <div className="space-y-2">
-            <p className="eyebrow">Step 1 of 2</p>
+            <p className="eyebrow">Step 3 of 3</p>
             <h1 className="text-3xl font-bold tracking-tight md:text-4xl">
-              Set up your <span className="text-gradient">search</span>
+              Run your <span className="text-gradient">search</span>
             </h1>
             <p className="max-w-2xl text-muted-foreground">
-              Describe yourself, add a few keywords, and press start. Tesserae handles the rest.
+              Pick the keywords and press start. Your profile lives on its own pages.
             </p>
           </div>
           <div className="flex gap-3">
             <Link href="/">
               <Button variant="outline">Dashboard</Button>
+            </Link>
+            <Link href="/about">
+              <Button variant="outline">About you</Button>
             </Link>
             <Link href="/runs">
               <Button variant="outline">All runs</Button>
@@ -182,15 +163,11 @@ export default function ConfigClient() {
           </div>
         )}
 
-        <div className="grid items-start gap-6 lg:grid-cols-2">
-          <ProfileForm
-            key={`${profile.about_us}::${profile.additional_filters}`}
-            onSave={handleProfileSave}
-            initialData={profile}
-            runMode={runMode}
-          />
-          <FilterBuilder onStart={handleStart} onRunModeChange={handleRunModeChange} initialData={lastSelection} />
-        </div>
+        <FilterBuilder
+          onStart={handleStart}
+          onRunModeChange={handleRunModeChange}
+          initialData={lastSelection}
+        />
 
         <Card className="border-border/50">
           <CardHeader>
