@@ -66,7 +66,12 @@ LAST_SELECTION_PATH = os.path.join(
 # ── Helper: run orchestrator with given filters ────────────────────────────
 
 async def _run_with_filters(
-    filters: ScrapingFilters, cycles: int | None, run_mode: str, run_id: str | None = None
+    filters: ScrapingFilters,
+    cycles: int | None,
+    run_mode: str,
+    run_id: str | None = None,
+    family_id: str | None = None,
+    request_family_id: str | None = None,
 ) -> dict:
     """Run the orchestrator with the given filters and return the summary.
 
@@ -78,11 +83,18 @@ async def _run_with_filters(
     profile = UserProfile(background=about or "(about-us file empty)")
 
     summary = await run_orchestrator(
-        RunConfig(profile=profile, filters=filters),
+        RunConfig(
+            profile=profile,
+            filters=filters,
+            family_id=family_id,
+            request_family_id=request_family_id,
+        ),
         headless=False,
         max_cycles=cycles,
         run_mode=run_mode,
         run_id=run_id,
+        family_id=family_id,
+        request_family_id=request_family_id,
     )
     return summary
 

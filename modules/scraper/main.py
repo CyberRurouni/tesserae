@@ -20,9 +20,11 @@ from core import (
     PROFILE_HASH_TTL,
 )
 
+from modules.families.index import get_family_index
+
 from .browser import browser_session
 from .extract import extract_ads_from_page
-from .seen import RunSeenIds, get_seen_index
+from .seen import RunSeenIds
 from .search import (
     apply_filters,
     collect_page_html,
@@ -153,6 +155,7 @@ async def run_scrape(
     headless: bool = False,
     context: BrowserContext | None = None,
     run_seen_ids: RunSeenIds | None = None,
+    family_id: str | None = None,
 ) -> list[AdRecord]:
     """
     Full scrape pass: for each keyword, search the library, extract ads,
@@ -169,6 +172,9 @@ async def run_scrape(
     run_seen_ids: optional run-scoped shared set. The orchestrator passes one so
     the ids this pass harvests are visible to sibling workers; omit it (smoke
     runner, tests) and dedup stays in-process.
+    family_id: the family whose verdicts decide what to skip. Without it the
+    only dedup available is within this pass — callers should resolve the
+    active family rather than skip this.
     """
     # The lens for this run — scopes verdict keys, heuristics and storage.
     cat_id = filters.category
@@ -182,11 +188,17 @@ async def run_scrape(
         logger.info("🔎 Category lens: %s — %s", category.label, cat_id)
 
     run_seen = run_seen_ids or RunSeenIds()
+    # In-memory mirror of this family's verdicts (plus its ancestors'), loaded
+    # once instead of one Redis round trip per scraped card. With no family the
+    # mirror is empty, which degrades to within-pass dedup only.
+    verdict_index = get_family_index(cat_id, family_id) if family_id else None
+    if verdict_index is None:
+        logger.warning("⚠️ No family for this run — only within-pass dedup is active")
 
     if context is not None:
-        return await _scrape_on(context, filters, category, cat_id, run_seen)
+        return await _scrape_on(context, filters, category, cat_id, run_seen, verdict_index)
     async with browser_session(headless=headless) as owned:
-        return await _scrape_on(owned, filters, category, cat_id, run_seen)
+        return await _scrape_on(owned, filters, category, cat_id, run_seen, verdict_index)
 
 
 async def _scrape_on(
@@ -195,6 +207,7 @@ async def _scrape_on(
     category,
     cat_id: str,
     run_seen: RunSeenIds,
+    verdict_index=None,
 ) -> list[AdRecord]:
     """The keyword loop on an existing context. Owns only its page."""
     fresh: list[AdRecord] = []
@@ -204,10 +217,9 @@ async def _scrape_on(
     # code rebuilt this set inside the loop, so dedup only ever applied within a
     # single keyword's scroll.
     seen_ids: set[str] = set()
-    # Ads that already have a FINAL verdict under this category+profile. Loaded
-    # once into memory rather than asked per card — a Redis round trip per
-    # scraped card costs far more than the dedup it enables.
-    seen_index = get_seen_index(cat_id, filters)
+    # Ads already judged for this family (or an ancestor). Loaded once into
+    # memory rather than asked per card.
+    seen_index = verdict_index
     # Ids looked at during THIS run, shared with any other worker on it.
     # Supplied by the caller (the orchestrator owns it for the whole run); the
     # smoke runner and tests may pass a memory-only instance.
@@ -273,7 +285,8 @@ async def _scrape_on(
                     # Yield that is entirely already-final cannot improve the
                     # run, so track it separately from "no cards at all".
                     if all(
-                        seen_index.has(ad.ad_archive_id) or run_seen.has(ad.ad_archive_id)
+                        (seen_index is not None and seen_index.has(ad.ad_archive_id))
+                        or run_seen.has(ad.ad_archive_id)
                         for ad in new_ads
                     ):
                         all_known_steps += 1
@@ -325,8 +338,9 @@ async def _scrape_on(
             fresh_before = len(fresh)
             for ad in keyword_ads:
                 # In-memory check — the mirror already contains everything
-                # marked earlier in this run and every previous run's verdicts.
-                if seen_index.has(ad.ad_archive_id):
+                # judged for this family, everything recorded earlier in this
+                # run, and every ancestor's verdicts.
+                if seen_index is not None and seen_index.has(ad.ad_archive_id):
                     already_final += 1
                     continue
                 if run_seen.has(ad.ad_archive_id) and run_seen.shared:

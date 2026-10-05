@@ -38,11 +38,29 @@ def _json_hint(shape: str) -> str:
 
 
 def _chains_for_prompt() -> str:
-    lines = [
-        f'  "{domain} -> {spec}"' for domain, specs in taxonomy.SPECIALISATIONS.items()
-        for spec in specs
-    ]
-    return "\n".join(lines)
+    """Grouped by domain so the model copies a bare specialisation name."""
+    return "\n".join(
+        f"  {domain}:\n" + "\n".join(f'    - "{spec}"' for spec in specs)
+        for domain, specs in taxonomy.SPECIALISATIONS.items()
+    )
+
+
+def _parse_specialisations(raw_value) -> list[str]:
+    """
+    Accept bare names, and tolerate the model echoing a whole chain.
+
+    Observed in practice: asked for specialisations it returned
+    ["Programming -> Backend development"]. Taking the last segment recovers the
+    right value instead of discarding an otherwise good classification.
+    """
+    out: list[str] = []
+    for item in raw_value or []:
+        value = str(item).strip()
+        if "->" in value:
+            value = value.split("->")[-1].strip()
+        if value and value not in out:
+            out.append(value)
+    return out
 
 
 # ============================================================================
@@ -88,8 +106,11 @@ Also assign:
                   one. A JavaScript developer covering frontend AND backend
                   must list both — listing only one would hide the family from a
                   "Backend development" family that should have found it.
+                  Copy the specialisation name EXACTLY as written below, e.g.
+                  "Backend development". Do NOT include the domain and do NOT
+                  write it as a chain like "Programming -> Backend development".
 
-Valid specialisations per domain:
+Valid domains and their specialisations (copy the specialisation name only):
 {_chains_for_prompt()}
 
 new_family_required is true for "narrowing" and "widening", false for "none".
@@ -119,7 +140,7 @@ async def classify_profile_change(current_text: str, edited_text: str) -> Family
     )
 
     domain = str(raw.get("category_domain") or "").strip()
-    specs = [str(s).strip() for s in (raw.get("specialisations") or []) if str(s).strip()]
+    specs = _parse_specialisations(raw.get("specialisations"))
     result = FamilyClassification(
         change=raw.get("change") or "none",
         new_family_required=bool(raw.get("new_family_required")),
@@ -130,10 +151,12 @@ async def classify_profile_change(current_text: str, edited_text: str) -> Family
     )
 
     if not taxonomy.is_valid(domain, specs):
-        # A hallucinated level would break related-family discovery, so fail
-        # closed rather than store something unmatchable.
+        # An off-taxonomy level would break related-family discovery, so the
+        # SCOPE is discarded. The `about` label is independent and often
+        # perfectly good, so it is kept — dropping it would lose a useful name
+        # over a taxonomy nit.
         logger.warning(
-            "⚠️ Classifier proposed off-taxonomy scope %r/%r — leaving unclassified",
+            "⚠️ Classifier proposed off-taxonomy scope %r/%r — keeping the name, dropping the scope",
             domain, specs,
         )
         result.category_domain, result.specialisations = "", []

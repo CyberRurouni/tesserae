@@ -84,6 +84,8 @@ async def run_orchestrator(
     max_cycles: int | None = None,
     run_mode: str = "generate",  # "existing" or "generate"
     run_id: str | None = None,
+    family_id: str | None = None,
+    request_family_id: str | None = None,
 ) -> dict:
     """
     Run the keyword lifecycle.
@@ -95,9 +97,28 @@ async def run_orchestrator(
         searched exactly once, ever). max_cycles bounds COMPLETED cycles.
     run_id: name of the single result file this run writes (see record_results).
     """
+    # A caller that did not name a family gets one resolved, so every later
+    # stage (scrape skip, verdict write, lead list) can rely on config.family_id
+    # being set rather than re-checking at each site.
+    if not config.family_id:
+        try:
+            from modules.families.active import ensure_active_family
+
+            family = await ensure_active_family()
+            config = config.model_copy(
+                update={"family_id": family.family_id, "request_family_id": request_family_id}
+            )
+        except Exception as exc:  # noqa: BLE001 - never block a run on this
+            logger.warning("⚠️ Could not resolve an active family (%s)", exc)
+    elif request_family_id and not config.request_family_id:
+        config = config.model_copy(update={"request_family_id": request_family_id})
+
     category_id = config.filters.category
     about, additional_filters = _load_texts()
-    logger.info("🚀 Orchestrator start — category %r, pool limit %d, mode=%s", category_id, config.keyword_pool_limit, run_mode)
+    logger.info(
+        "🚀 Orchestrator start — category %r, pool limit %d, mode=%s, family=%s",
+        category_id, config.keyword_pool_limit, run_mode, config.family_id or "(none)",
+    )
 
     totals = {"cycles": 0, "keywords_searched": 0, "relevant_ads": 0}
 
@@ -285,7 +306,13 @@ async def _search_and_judge(
     if searched_keywords is not None:
         searched_keywords.extend(keywords)
 
-    ads = await run_scrape(filters, headless=False, context=context, run_seen_ids=run_seen)
+    ads = await run_scrape(
+        filters,
+        headless=False,
+        context=context,
+        run_seen_ids=run_seen,
+        family_id=config.family_id,
+    )
     if not ads:
         return 0, ads_by_kw, relevant_by_kw
 
@@ -302,6 +329,7 @@ async def _search_and_judge(
     summary = record_results(
         ads, verdicts, config.filters.category, config.filters,
         run_id=run_id, searched_keywords=searched_keywords,
+        family_id=config.family_id,
     )
     for ad in summary["accepted"]:
         if ad.source_keyword in relevant_by_kw:

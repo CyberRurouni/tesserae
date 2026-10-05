@@ -68,6 +68,10 @@ class RunRequest(BaseModel):
     cycles: Optional[int] = None
     run_until_complete: bool = False
     heuristic_patterns: Optional[dict[str, list[str]]] = None
+    # Which family to run under. Omitted => the active family, which is what
+    # the current one-page config UI implies.
+    family_id: Optional[str] = None
+    request_family_id: Optional[str] = None
 
     @field_validator("keywords", mode="before")
     @classmethod
@@ -182,6 +186,25 @@ def _keyword_targets(request: RunRequest) -> int:
 
 # ── Run lifecycle ──────────────────────────────────────────────────────────
 
+_MIGRATED: set[str] = set()
+
+
+def _migrate_once(family_id: str, category: str) -> bool:
+    """
+    Move legacy hash-namespaced verdicts into the family, once per process.
+
+    Without this the user loses every verdict they have accumulated and the
+    next run re-collects ads they have already seen — the exact symptom the
+    family model exists to remove.
+    """
+    if family_id in _MIGRATED:
+        return False
+    _MIGRATED.add(family_id)
+    from modules.families.active import migrate_legacy_verdicts
+
+    counts = migrate_legacy_verdicts(category, family_id)
+    return bool(counts["accepted"] or counts["rejected"])
+
 async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
     """Execute the orchestrator, updating the polled run state as it goes."""
     state = run_states.setdefault(run_id, {"id": run_id})
@@ -198,13 +221,29 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
         state["total_keywords"] = total
         state["progress"] = 5
 
-        logger.info("Run %s starting with %d keyword(s), mode=%s", run_id, len(filters.keywords), request.run_mode)
+        # Resolve the family BEFORE the orchestrator so the run state reports
+        # which lens it ran under, and so the one-time migration off the old
+        # profile-hash verdict namespace happens against a real family.
+        from modules.families.active import ensure_active_family, migrate_legacy_verdicts
+
+        family = await ensure_active_family()
+        state["family_id"] = family.family_id
+        state["family_about"] = family.about
+        if not request.family_id and _migrate_once(family.family_id, filters.category):
+            pass
+
+        logger.info(
+            "Run %s starting with %d keyword(s), mode=%s, family=%s",
+            run_id, len(filters.keywords), request.run_mode, family.family_id,
+        )
 
         summary = await _run_with_filters(
             filters,
             None if request.run_until_complete else (request.cycles or 1),
             request.run_mode,
             run_id,
+            request.family_id,
+            request.request_family_id,
         )
 
         counts = state.setdefault("counts", {"accepted": 0, "rejected": 0, "ai_failed": 0})

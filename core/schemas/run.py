@@ -36,6 +36,14 @@ class RunConfig(BaseModel):
     filters: ScrapingFilters
     time_window: TimeWindow | None = None
 
+    # Which family this run belongs to. Verdicts are recorded against the
+    # family (and inherited from its ancestors), NOT against a hash of the
+    # profile text — a hash silently rotated the whole key space on any edit.
+    # None means "resolve the active family at start".
+    family_id: str | None = None
+    # Which request family governs accept-vs-defer for this run.
+    request_family_id: str | None = None
+
     # Keyword lifecycle — collection-based (approved design).
     keyword_pool_limit: int = 25            # collection size that triggers the coverage review
     keywords_per_generation: int = 12       # the generator returns 10-15

@@ -15,7 +15,8 @@ from datetime import datetime, timezone
 
 from core import ADS_DIR, AdRelevanceVerdict, AdRecord, PROFILE_HASH_TTL
 
-from modules.scraper.seen import get_seen_index
+from modules.families.index import get_family_index
+from modules.families import store as family_store
 from core import ScrapingFilters
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ def record_results(
     filters: ScrapingFilters | None = None,
     run_id: str | None = None,
     searched_keywords: list[str] | None = None,
+    family_id: str | None = None,
 ) -> dict:
     """
     Apply verdicts: mark + store + write the run files under
@@ -72,22 +74,41 @@ def record_results(
             judged_rejects.append(entry)
 
     # Final verdicts only — AI-failures stay unmarked (free retry later).
-    # Goes through the shared in-memory mirror so an ad judged in cycle 1 is
-    # skipped by cycle 2 of the SAME run without a Redis round trip per card.
-    seen_index = get_seen_index(category_id, filters)
+    #
+    # Recorded against the FAMILY, not against a hash of the profile text. That
+    # hash was the original duplicate bug: one edited word rotated the entire
+    # key space and every previously judged ad looked unseen again. A family
+    # records LINEAGE, so a new node inherits its ancestors' verdicts instead.
     newly_marked = 0
+    family_index = get_family_index(category_id, family_id) if family_id else None
+    if family_index is None:
+        logger.warning("⚠️ No family for these results — verdicts not recorded (dedup stays within-run only)")
     for ad in ads:
         v = verdicts[ad.ad_archive_id]
-        if not v.ai_failed and seen_index.mark(ad.ad_archive_id, ttl=PROFILE_HASH_TTL):
+        if v.ai_failed or family_index is None:
+            continue
+        if not family_index.has(ad.ad_archive_id):
             newly_marked += 1
+        family_index.record(
+            ad.ad_archive_id,
+            "accepted" if v.relevant else "rejected",
+            reason=v.reason,
+            ad_category=ad.category or "",
+        )
 
     cat_dir = ADS_DIR / category_id
     cat_dir.mkdir(parents=True, exist_ok=True)
 
-    store_path = cat_dir / "stored_ads.json"
-    store = json.loads(store_path.read_text()) if store_path.exists() else []
-    store.extend(ad.model_dump(mode="json") for ad in accepted)
-    store_path.write_text(json.dumps(store, indent=2, ensure_ascii=False))
+    # Accepted ads go to the family's LEAD LIST: deduped, never pruned, and
+    # mirrored to JSON so a row can never be lost to a Redis flush. This
+    # replaces the old append-only store, which had grown to 47 rows for 26
+    # unique ads because nothing ever checked.
+    if family_id and accepted:
+        added = family_store.add_leads(
+            family_id, [ad.model_dump(mode="json") for ad in accepted]
+        )
+        if added:
+            logger.info("📥 Lead list for %s: %d new lead(s)", family_id, added)
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     run_path = cat_dir / (f"{run_id}.json" if run_id else f"run_{stamp}.json")
