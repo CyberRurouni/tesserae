@@ -27,6 +27,14 @@ from .coverage import (
     ExclusionPrompt,
 )
 from .run import UserProfile, TimeWindow, RunConfig
+from .family import (
+    ChangeKind,
+    Family,
+    FamilyClassification,
+    RequestClassification,
+    RequestFamily,
+    ScopeCheck,
+)
 
 __all__ = [
     "AdRecord",
@@ -57,4 +65,10 @@ __all__ = [
     "UserProfile",
     "TimeWindow",
     "RunConfig",
+    "ChangeKind",
+    "Family",
+    "FamilyClassification",
+    "RequestClassification",
+    "RequestFamily",
+    "ScopeCheck",
 ]

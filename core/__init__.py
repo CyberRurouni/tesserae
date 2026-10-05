@@ -76,6 +76,12 @@ from .schemas import (
     UserProfile,
     TimeWindow,
     RunConfig,
+    ChangeKind,
+    Family,
+    FamilyClassification,
+    RequestClassification,
+    RequestFamily,
+    ScopeCheck,
 )
 
 # ----------

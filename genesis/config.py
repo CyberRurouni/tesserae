@@ -48,6 +48,8 @@ ADS_DIR = DATA_DIR / "ads"                # fetched ads, per category
 KEYWORDS_DIR = DATA_DIR / "keywords"      # keyword history / batches
 COVERAGE_DIR = DATA_DIR / "coverage"      # persisted exclusion prompts
 EXPORTS_DIR = BASE_DIR / "exports"        # per-run Excel exports
+FAMILIES_DIR = DATA_DIR / "families"      # family + request-family records
+LEADS_DIR = DATA_DIR / "leads"            # per-family accepted ads (never pruned)
 
 # User-supplied profile texts (paste/edit these files directly).
 PROFILE_DIR = DATA_DIR / "profile"
@@ -61,7 +63,8 @@ ADDITIONAL_FILTERS_PATH = PROFILE_DIR / "additional_filters.txt"
 BROWSER_PROFILE_DIR = BASE_DIR / "browser_profile"
 
 # Ensure the storage tree exists on first import.
-for _dir in (ADS_DIR, KEYWORDS_DIR, COVERAGE_DIR, EXPORTS_DIR, BROWSER_PROFILE_DIR, PROFILE_DIR):
+for _dir in (ADS_DIR, KEYWORDS_DIR, COVERAGE_DIR, EXPORTS_DIR, BROWSER_PROFILE_DIR, PROFILE_DIR,
+             FAMILIES_DIR, LEADS_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
 
 
