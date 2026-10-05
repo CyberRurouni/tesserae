@@ -72,6 +72,7 @@ async def _run_with_filters(
     run_id: str | None = None,
     family_id: str | None = None,
     request_family_id: str | None = None,
+    parallel_workers: int = 1,
 ) -> dict:
     """Run the orchestrator with the given filters and return the summary.
 
@@ -88,6 +89,7 @@ async def _run_with_filters(
             filters=filters,
             family_id=family_id,
             request_family_id=request_family_id,
+            parallel_workers=parallel_workers,
         ),
         headless=False,
         max_cycles=cycles,

@@ -331,6 +331,7 @@ async def _search_and_judge(
         # like trash instead of something worth keeping.
         profile_text=config.profile.background,
         request_family_id=config.request_family_id,
+        parallel_workers=config.parallel_workers,
     )
     summary = record_results(
         ads, verdicts, config.filters.category, config.filters,

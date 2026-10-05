@@ -72,6 +72,9 @@ class RunRequest(BaseModel):
     # the current one-page config UI implies.
     family_id: Optional[str] = None
     request_family_id: Optional[str] = None
+    # Keywords crawled at once. 1 keeps the original sequential behaviour;
+    # raise it for speed at the cost of captcha exposure.
+    parallel_workers: int = 1
 
     @field_validator("keywords", mode="before")
     @classmethod
@@ -247,6 +250,7 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
             run_id,
             request.family_id,
             request.request_family_id,
+            max(1, min(int(request.parallel_workers or 1), 3)),
         )
 
         counts = state.setdefault("counts", {"accepted": 0, "rejected": 0, "ai_failed": 0})

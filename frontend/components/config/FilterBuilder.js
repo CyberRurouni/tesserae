@@ -32,6 +32,9 @@ const AD_AGE_PRESETS = [
 // so the About You notice can never disagree with the selected option.
 export const INITIAL_RUN_MODE = 'existing';
 
+// Kept in step with core.schemas.run.MAX_PARALLEL_WORKERS.
+export const MAX_PARALLEL_WORKERS = 3;
+
 const INITIAL = {
   category: 'career_jobs',
   delivery_status: 'active',
@@ -46,6 +49,7 @@ const INITIAL = {
   run_mode: INITIAL_RUN_MODE,
   cycles: 3,
   run_until_complete: false,
+  parallel_workers: 1,
 };
 
 function formatKeywordPreview(keywords, max = 3) {
@@ -233,6 +237,10 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
       languages: restoredLanguages[0] || 'all',
       ad_age_hours: merged.ad_age_hours == null ? '' : String(merged.ad_age_hours),
       cycles: Number(merged.cycles) || INITIAL.cycles,
+      parallel_workers: Math.min(
+        Math.max(Number(merged.parallel_workers) || INITIAL.parallel_workers, 1),
+        MAX_PARALLEL_WORKERS
+      ),
     };
   }, [initialData]);
 
@@ -492,6 +500,30 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
                 </span>
               </span>
             </label>
+
+            <div className="flex flex-col gap-3 rounded-xl border border-border/60 p-4 sm:flex-row sm:items-center">
+              <label htmlFor="parallel_workers" className="text-sm font-medium text-foreground sm:w-40">
+                Search speed
+              </label>
+              <input
+                id="parallel_workers"
+                type="range"
+                min="1"
+                max={MAX_PARALLEL_WORKERS}
+                step="1"
+                value={formData.parallel_workers}
+                onChange={(e) => update('parallel_workers', Number(e.target.value))}
+                className="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-border accent-[hsl(var(--primary))]"
+              />
+              <span className="rounded-lg border border-border bg-background px-3 py-1.5 text-sm font-semibold text-foreground sm:w-32 text-center">
+                {formData.parallel_workers} at a time
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {formData.parallel_workers === 1
+                ? 'One keyword at a time — slowest, but least likely to be challenged.'
+                : `${formData.parallel_workers} keywords searched at once. Faster, but a higher chance of a captcha. Drop back to 1 if you get blocked.`}
+            </p>
 
             <div className={cn('flex flex-col gap-3 sm:flex-row sm:items-center', formData.run_until_complete && 'opacity-50')}>
               <label htmlFor="cycles" className="text-sm font-medium text-foreground sm:w-40">

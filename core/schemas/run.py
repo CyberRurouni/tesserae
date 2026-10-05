@@ -11,6 +11,9 @@ from datetime import time
 
 from pydantic import BaseModel, Field
 
+# Concurrency multiplies captcha exposure, so the ceiling is deliberately low.
+MAX_PARALLEL_WORKERS = 3
+
 from .filters import ScrapingFilters
 
 
@@ -43,6 +46,11 @@ class RunConfig(BaseModel):
     family_id: str | None = None
     # Which request family governs accept-vs-defer for this run.
     request_family_id: str | None = None
+
+    # How many keywords to crawl at once. 1 = sequential (original behaviour).
+    # Above 1 each worker gets its own page; higher means faster and a higher
+    # chance of a captcha, which is why it is a setting and not a constant.
+    parallel_workers: int = Field(default=1, ge=1, le=MAX_PARALLEL_WORKERS)
 
     # Keyword lifecycle — collection-based (approved design).
     keyword_pool_limit: int = 25            # collection size that triggers the coverage review
