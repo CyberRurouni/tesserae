@@ -22,6 +22,7 @@ from core import (
 
 from .browser import browser_session
 from .extract import extract_ads_from_page
+from .seen import RunSeenIds, get_seen_index
 from .search import (
     apply_filters,
     collect_page_html,
@@ -59,6 +60,12 @@ QUIET_STEPS_BEFORE_TARGET = 5
 QUIET_STEPS_AFTER_TARGET = 3
 CARDS_PER_STEP_GUESS = 8
 HARD_STEP_CAP_MULTIPLIER = 3.0
+
+# Consecutive scroll steps in which EVERY harvested card already has a verdict
+# before we abandon a keyword. Kept above 1 on purpose: with an overlapping
+# keyword set a burst of known cards is normal at the top of a result page,
+# and bailing there would under-collect exactly when dedup is doing its job.
+ALL_KNOWN_STEPS_BEFORE_EXIT = 4
 
 
 def _scroll_budget(estimate: int | None) -> int:
@@ -145,11 +152,12 @@ async def run_scrape(
     filters: ScrapingFilters,
     headless: bool = False,
     context: BrowserContext | None = None,
+    run_seen_ids: RunSeenIds | None = None,
 ) -> list[AdRecord]:
     """
     Full scrape pass: for each keyword, search the library, extract ads,
     apply heuristics, and return candidates that have no FINAL verdict
-    yet. Marking happens only after the AI checkpoint — see already_fetched.
+    yet. Marking happens only after the AI checkpoint — see SeenIndex.
     No AI involved in this city.
 
     Browser ownership: pass `context` to reuse an already-open browser
@@ -157,6 +165,10 @@ async def run_scrape(
     between cycles wastes minutes and looks robotic). Without it, this
     call owns a fresh session and closes it before returning (smoke
     runner behavior).
+
+    run_seen_ids: optional run-scoped shared set. The orchestrator passes one so
+    the ids this pass harvests are visible to sibling workers; omit it (smoke
+    runner, tests) and dedup stays in-process.
     """
     # The lens for this run — scopes verdict keys, heuristics and storage.
     cat_id = filters.category
@@ -169,10 +181,12 @@ async def run_scrape(
     else:
         logger.info("🔎 Category lens: %s — %s", category.label, cat_id)
 
+    run_seen = run_seen_ids or RunSeenIds()
+
     if context is not None:
-        return await _scrape_on(context, filters, category, cat_id)
+        return await _scrape_on(context, filters, category, cat_id, run_seen)
     async with browser_session(headless=headless) as owned:
-        return await _scrape_on(owned, filters, category, cat_id)
+        return await _scrape_on(owned, filters, category, cat_id, run_seen)
 
 
 async def _scrape_on(
@@ -180,9 +194,25 @@ async def _scrape_on(
     filters: ScrapingFilters,
     category,
     cat_id: str,
+    run_seen: RunSeenIds,
 ) -> list[AdRecord]:
     """The keyword loop on an existing context. Owns only its page."""
     fresh: list[AdRecord] = []
+    # Shared across EVERY keyword in this pass. One ad usually matches several
+    # keywords (especially with an overlapping keyword set), and re-harvesting
+    # it per keyword is what produced duplicate rows in the run files: the old
+    # code rebuilt this set inside the loop, so dedup only ever applied within a
+    # single keyword's scroll.
+    seen_ids: set[str] = set()
+    # Ads that already have a FINAL verdict under this category+profile. Loaded
+    # once into memory rather than asked per card — a Redis round trip per
+    # scraped card costs far more than the dedup it enables.
+    seen_index = get_seen_index(cat_id, filters)
+    # Ids looked at during THIS run, shared with any other worker on it.
+    # Supplied by the caller (the orchestrator owns it for the whole run); the
+    # smoke runner and tests may pass a memory-only instance.
+    all_known_steps = 0
+
     page = await context.new_page()
     try:
 
@@ -199,8 +229,9 @@ async def _scrape_on(
             # (safety margin), ending on quiet-step budgets that differ
             # by phase — latency-tolerant (10) before target, prompt (3)
             # after. Extraction yield, not scrollHeight, signals progress.
-            seen_ids: set[str] = set()
+            keyword_start_unique = len(seen_ids)
             keyword_ads: list[AdRecord] = []
+            all_known_steps = 0  # per keyword — never carried across the loop
 
             # Meta's own zero-results signal: skip the entire crawl —
             # scrolling an empty page is pointless and looks robotic.
@@ -232,11 +263,36 @@ async def _scrape_on(
                 new_ads = await extract_ads_from_page(
                     page, source_keyword=keyword, seen_ids=seen_ids
                 )
+                # Mirror this step's ids to the run-scoped set in one round
+                # trip so sibling workers never re-harvest what we just took.
+                run_seen.add_many(ad.ad_archive_id for ad in new_ads)
+
                 if new_ads:
                     quiet_steps = 0
                     keyword_ads.extend(new_ads)
+                    # Yield that is entirely already-final cannot improve the
+                    # run, so track it separately from "no cards at all".
+                    if all(
+                        seen_index.has(ad.ad_archive_id) or run_seen.has(ad.ad_archive_id)
+                        for ad in new_ads
+                    ):
+                        all_known_steps += 1
+                    else:
+                        all_known_steps = 0
                 else:
                     quiet_steps += 1
+
+                # Early exit: this keyword is only turning up ads we already
+                # have a verdict on, so scrolling to target just burns minutes.
+                # Requires a few consecutive such steps so a single overlap
+                # burst can't abandon a keyword that still has new ads deeper
+                # down the list.
+                if new_ads and all_known_steps >= ALL_KNOWN_STEPS_BEFORE_EXIT:
+                    logger.info(
+                        "⏭️ Keyword %r: %d consecutive steps of already-known ads — stopping early",
+                        keyword, all_known_steps,
+                    )
+                    break
 
                 if target_unique is None:
                     quiet_budget = QUIET_STEPS_BEFORE_TARGET  # no estimate: trust only yield
@@ -268,7 +324,13 @@ async def _scrape_on(
             already_final = heuristic_passed = 0
             fresh_before = len(fresh)
             for ad in keyword_ads:
-                if already_fetched(ad.ad_archive_id, cat_id, filters):
+                # In-memory check — the mirror already contains everything
+                # marked earlier in this run and every previous run's verdicts.
+                if seen_index.has(ad.ad_archive_id):
+                    already_final += 1
+                    continue
+                if run_seen.has(ad.ad_archive_id) and run_seen.shared:
+                    # Another worker on this run already took it.
                     already_final += 1
                     continue
                 if not passes_heuristics(ad, filters, category):
@@ -278,9 +340,10 @@ async def _scrape_on(
                 fresh.append(ad)
 
             logger.info(
-                "🧺 Keyword %r: %d unique harvested — %d already final, %d passed heuristics -> %d to AI (total: %d)",
+                "🧺 Keyword %r: %d unique harvested (%d new this keyword) — %d already final, %d passed heuristics -> %d to AI (total: %d)",
                 keyword,
                 len(seen_ids),
+                len(seen_ids) - keyword_start_unique,
                 already_final,
                 heuristic_passed,
                 len(fresh) - fresh_before,

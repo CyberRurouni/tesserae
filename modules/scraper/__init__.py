@@ -13,6 +13,7 @@ Citizens (main.py) draw from the city's warehouses:
 from .browser import browser_session, open_browser, close_browser
 from .extract import extract_ads_from_page
 from .main import already_fetched, mark_fetched, run_scrape
+from .seen import RunSeenIds, SeenIndex, get_seen_index, reset_index_cache
 
 __all__ = [
     "browser_session",
@@ -22,4 +23,8 @@ __all__ = [
     "already_fetched",
     "mark_fetched",
     "run_scrape",
+    "RunSeenIds",
+    "SeenIndex",
+    "get_seen_index",
+    "reset_index_cache",
 ]

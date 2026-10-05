@@ -39,6 +39,7 @@ from core import (
 
 from modules.checkpoints import judge_ad_relevance
 from modules.scraper import browser_session, run_scrape
+from modules.scraper.seen import RunSeenIds
 from modules.storage import record_results
 
 from . import actors
@@ -99,6 +100,10 @@ async def run_orchestrator(
     logger.info("🚀 Orchestrator start — category %r, pool limit %d, mode=%s", category_id, config.keyword_pool_limit, run_mode)
 
     totals = {"cycles": 0, "keywords_searched": 0, "relevant_ads": 0}
+
+    # One run-scoped set of harvested ids, shared by every cycle and every
+    # worker on this run. Without a run id it degrades to memory-only.
+    run_seen = RunSeenIds(run_id)
     # Accumulator: every keyword actually searched this run, in order. It is
     # filled in place by _search_and_judge, so every return carries the list.
     searched_keywords: list[str] = []
@@ -114,7 +119,7 @@ async def run_orchestrator(
             if user_keywords:
                 logger.info("🔍 Searching %d user-provided keyword(s): %s", len(user_keywords), user_keywords)
                 relevant, _, _ = await _search_and_judge(
-                    user_keywords, config, additional_filters, context, run_id, searched_keywords,
+                    user_keywords, config, additional_filters, context, run_id, searched_keywords, run_seen,
                 )
                 totals["cycles"] = 1
                 totals["keywords_searched"] += len(user_keywords)
@@ -140,7 +145,7 @@ async def run_orchestrator(
                 if not keywords_live:
                     return totals
                 relevant, _, _ = await _search_and_judge(
-                    [s.keyword for s in keywords_live], config, additional_filters, context, run_id, searched_keywords,
+                    [s.keyword for s in keywords_live], config, additional_filters, context, run_id, searched_keywords, run_seen,
                 )
                 totals["cycles"] += 1
                 totals["relevant_ads"] += relevant
@@ -174,7 +179,7 @@ async def run_orchestrator(
             search_array = user_keywords + array if provided_pending else array
             provided_pending = False
             relevant, ads_by_kw, relevant_by_kw = await _search_and_judge(
-                search_array, config, additional_filters, context, run_id, searched_keywords,
+                search_array, config, additional_filters, context, run_id, searched_keywords, run_seen,
             )
             totals["cycles"] += 1
             totals["keywords_searched"] += len(search_array)
@@ -263,6 +268,7 @@ async def _search_and_judge(
     context,
     run_id: str | None = None,
     searched_keywords: list[str] | None = None,
+    run_seen: RunSeenIds | None = None,
 ) -> tuple[int, dict[str, int], dict[str, int]]:
     """
     One sequential scrape+judge pass over `keywords`, on the SHARED
@@ -279,7 +285,7 @@ async def _search_and_judge(
     if searched_keywords is not None:
         searched_keywords.extend(keywords)
 
-    ads = await run_scrape(filters, headless=False, context=context)
+    ads = await run_scrape(filters, headless=False, context=context, run_seen_ids=run_seen)
     if not ads:
         return 0, ads_by_kw, relevant_by_kw
 

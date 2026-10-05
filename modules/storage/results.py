@@ -13,9 +13,9 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from core import ADS_DIR, AdRelevanceVerdict, AdRecord
+from core import ADS_DIR, AdRelevanceVerdict, AdRecord, PROFILE_HASH_TTL
 
-from modules.scraper import already_fetched, mark_fetched
+from modules.scraper.seen import get_seen_index
 from core import ScrapingFilters
 
 logger = logging.getLogger(__name__)
@@ -72,11 +72,13 @@ def record_results(
             judged_rejects.append(entry)
 
     # Final verdicts only — AI-failures stay unmarked (free retry later).
+    # Goes through the shared in-memory mirror so an ad judged in cycle 1 is
+    # skipped by cycle 2 of the SAME run without a Redis round trip per card.
+    seen_index = get_seen_index(category_id, filters)
     newly_marked = 0
     for ad in ads:
         v = verdicts[ad.ad_archive_id]
-        if not already_fetched(ad.ad_archive_id, category_id, filters) and not v.ai_failed:
-            mark_fetched(ad.ad_archive_id, category_id, filters)
+        if not v.ai_failed and seen_index.mark(ad.ad_archive_id, ttl=PROFILE_HASH_TTL):
             newly_marked += 1
 
     cat_dir = ADS_DIR / category_id
