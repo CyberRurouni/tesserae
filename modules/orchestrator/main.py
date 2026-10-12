@@ -102,9 +102,36 @@ async def run_orchestrator(
 
     category_id = config.filters.category
     about, additional_filters = _load_texts()
+
+    # The profile FILE is only a mirror of the active profile, so it is the
+    # wrong source when a run names a profile explicitly — the file would still
+    # hold whichever profile was active last, and the AI would generate keywords
+    # for that one while judging against the requested profile. Resolve from the
+    # profile store whenever we know which profile this run belongs to.
+    if config.profile_id:
+        from modules.profiles import store as profile_store
+
+        profile = profile_store.get_profile(config.profile_id)
+        if profile is not None:
+            if profile.profile_text != about:
+                logger.info(
+                    "🪞 Using profile %r's own text, not the mirrored profile file",
+                    config.profile_id,
+                )
+            about = profile.profile_text
+            requests = profile_store.list_requests(config.profile_id)
+            if config.request_id:
+                for r in requests:
+                    if r.request_id == config.request_id:
+                        additional_filters = r.request_text
+                        break
+            elif requests:
+                additional_filters = requests[0].request_text
+
     logger.info(
-        "🚀 Orchestrator start — category %r, pool limit %d, mode=%s, profile=%s",
-        category_id, config.keyword_pool_limit, run_mode, config.profile_id or "(no profile)",
+        "🚀 Orchestrator start — category %r, pool limit %d, mode=%s, profile=%s, workers=%d",
+        category_id, config.keyword_pool_limit, run_mode,
+        config.profile_id or "(no profile)", config.parallel_workers,
     )
 
     totals = {"cycles": 0, "keywords_searched": 0, "relevant_ads": 0}
@@ -143,19 +170,33 @@ async def run_orchestrator(
         provided_pending = bool(user_keywords)
 
         while True:
-            live = coll.load_collection(category_id)
+            live = coll.load_collection(category_id, config.profile_id)
             keywords_live: list[KeywordStats] = live["keywords"]
             prompts_live: list[str] = [p["prompt"] for p in live["prompts"]]
 
             # ---------------- HARVEST MODE ----------------
-            if coll.harvest_active(category_id):
+            if coll.harvest_active(category_id, config.profile_id):
                 logger.info("🌾 Harvest mode: re-searching %d alive keyword(s) for fresh ads", len(keywords_live))
-                if not keywords_live:
+                # Harvest re-searches what it already has. Keywords the user
+                # typed for THIS run are not in that collection, so silently
+                # replacing them meant typing a keyword and watching it never
+                # be searched — with no error, and harvest mode is silent
+                # enough that nothing on screen suggests why.
+                round_keywords = [s.keyword for s in keywords_live]
+                if provided_pending and user_keywords:
+                    round_keywords = user_keywords + round_keywords
+                    provided_pending = False
+                    logger.info(
+                        "🌾 Harvest mode: %d keyword(s) from this run ride along first",
+                        len(user_keywords),
+                    )
+                if not round_keywords:
                     return totals
                 relevant, _, _ = await _search_and_judge(
-                    [s.keyword for s in keywords_live], config, additional_filters, context, run_id, searched_keywords, run_seen,
+                    round_keywords, config, additional_filters, context, run_id, searched_keywords, run_seen,
                 )
                 totals["cycles"] += 1
+                totals["keywords_searched"] += len(round_keywords)
                 totals["relevant_ads"] += relevant
                 logger.info("🌾 Harvest round done — %d relevant ads this round", relevant)
                 return totals
@@ -201,11 +242,12 @@ async def run_orchestrator(
             for s in stats:
                 t = timings.get(s.keyword)
                 days = t.reuse_after_days if t and t.reuse_after_days is not None else 1
-                coll.save_keyword(s, category_id, datetime.now(timezone.utc) + timedelta(days=days))
+                coll.save_keyword(s, category_id, datetime.now(timezone.utc) + timedelta(days=days),
+                                 profile_id=config.profile_id)
                 logger.info("⏳ %r -> reuse in %d day(s) (%s)", s.keyword, days, t.reason if t else "default")
 
             # ---------------- THRESHOLD -> COVERAGE REVIEW ----------------
-            live = coll.load_collection(category_id)
+            live = coll.load_collection(category_id, config.profile_id)
             keywords_live = live["keywords"]
             if len(keywords_live) < config.keyword_pool_limit:
                 logger.info("📚 Collection: %d/%d — below limit, next cycle", len(keywords_live), config.keyword_pool_limit)
@@ -241,8 +283,9 @@ async def run_orchestrator(
                 coll.save_prompt(
                     prompt.prompt, prompt.covered_keywords, category_id,
                     expires_at=now + timedelta(days=timing.expire_after_days),
+                    profile_id=config.profile_id,
                 )
-                coll.delete_keywords(category_id, prompt.covered_keywords)
+                coll.delete_keywords(category_id, prompt.covered_keywords, config.profile_id)
                 logger.info(
                     "🧩 Prompt %r replaces %d keyword(s), expires in %d day(s)",
                     prompt.prompt, len(prompt.covered_keywords), timing.expire_after_days,
@@ -253,7 +296,7 @@ async def run_orchestrator(
 
             # ---------------- ALL COVERED -> HARVEST ----------------
             if review.all_covered and config.harvest_enabled:
-                coll.set_harvest_flag(category_id, review.recheck_after_days or 7)
+                coll.set_harvest_flag(category_id, review.recheck_after_days or 7, config.profile_id)
                 logger.info("✅ All skills covered — harvest mode for %d day(s)", review.recheck_after_days or 7)
 
 
@@ -299,6 +342,12 @@ async def _search_and_judge(
         context=context,
         run_seen_ids=run_seen,
         profile_id=config.profile_id,
+        # Both were omitted, so every run scraped sequentially regardless of
+        # the setting: run_scrape defaults parallel_workers to 1, and without
+        # a request_id the deferred bucket is never loaded — parked ads get
+        # judged again every run.
+        request_id=config.request_id,
+        parallel_workers=config.parallel_workers,
     )
     if not ads:
         return 0, ads_by_kw, relevant_by_kw

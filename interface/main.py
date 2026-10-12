@@ -14,7 +14,9 @@ Run with:  python -m interface.main
 import asyncio
 import json
 import logging
+import os
 import socket
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -225,7 +227,11 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
         # Resolve the profile before the orchestrator so the run state reports
         # which lens it ran under. Accepted leads and universal junk are global
         # and need no profile; only this profile's own rejections do.
-        from modules.profiles.active import active_request_id, ensure_active_profile
+        from modules.profiles.active import (
+            active_request_id,
+            ensure_active_profile,
+            read_active,
+        )
 
         profile = await ensure_active_profile()
         if not request.profile_id:
@@ -239,6 +245,27 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
                 request = request.model_copy(update={"request_id": active_request})
         state["profile_id"] = profile.profile_id
         state["profile_about"] = profile.about
+        state["request_id"] = request.request_id
+        # Record what the run will actually do, before it does it. Three
+        # separate bugs looked identical from the UI — a run that finished with
+        # none of your keywords searched — and the run state was the only place
+        # that could have said why.
+        state["parallel_workers"] = max(1, min(int(request.parallel_workers or 1), 3))
+        state["run_mode"] = request.run_mode
+        state["profile_is_active"] = profile.profile_id == (
+            read_active() or {}
+        ).get("profile_id")
+
+        from modules.orchestrator import collection as coll
+
+        if request.run_mode == "generate" and coll.harvest_active(
+            request.category or "career_jobs", profile.profile_id
+        ):
+            state["note"] = (
+                "Harvest mode is active: the AI will re-search this profile's own "
+                "keyword pool instead of generating new ones. Your keywords are "
+                "searched first."
+            )
 
         logger.info(
             "Run %s starting with %d keyword(s), mode=%s, profile=%s",
@@ -271,6 +298,17 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
         searched = summary.get("searched_keywords") or []
         if searched:
             state["keywords"] = list(searched)
+        # Say plainly when a run did not search what was asked for. Silently
+        # returning fewer keywords than were typed is the worst failure mode
+        # here: the run reports success and the user has to guess why.
+        requested = list(filters.keywords or [])
+        missed = [k for k in requested if k not in set(searched)]
+        if missed:
+            state["keywords_not_searched"] = missed
+            logger.warning(
+                "Run %s did not search %d requested keyword(s): %s",
+                run_id, len(missed), missed,
+            )
     except Exception as exc:  # noqa: BLE001 — surfaced to the UI via status
         logger.exception("Run %s failed", run_id)
         run_states[run_id].update(status="failed", error=str(exc), completed_at=datetime.now().isoformat())
@@ -437,10 +475,36 @@ def find_free_port(start_port: int = 8000, max_port: int = 9000) -> int:
     raise RuntimeError(f"No free ports in range {start_port}-{max_port}")
 
 
+def configure_logging() -> None:
+    """
+    Send application logs to stdout, once, whatever started the process.
+
+    This used to live under `if __name__ == "__main__"`, so running under
+    `uvicorn interface.main:app` — the documented way, and what the frontend
+    proxy expects — produced no application output at all. Only uvicorn's
+    access log appeared. Three separate bugs were reported as "it just didn't
+    search my keywords" with nothing to go on, and the lines that would have
+    said why were being thrown away.
+    """
+    root = logging.getLogger()
+    if any(isinstance(h, logging.StreamHandler) and
+           getattr(h, "_tesserae", False) for h in root.handlers):
+        return
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s | %(levelname)-7s | %(name)-28s | %(message)s")
+    )
+    handler._tesserae = True  # type: ignore[attr-defined]
+    root.addHandler(handler)
+    root.setLevel(os.getenv("TESSERAE_LOG_LEVEL", "INFO").upper())
+
+
+configure_logging()
+
+
 if __name__ == "__main__":
     import uvicorn
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
     port = find_free_port(8000)
     print(f"Tesserae API listening on http://localhost:{port}")
     uvicorn.run(app, host="0.0.0.0", port=port)

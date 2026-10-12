@@ -24,6 +24,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 from pathlib import Path
 
 # Must happen before genesis.config / redis_utils are imported anywhere.
@@ -323,10 +324,17 @@ def test_cycles():
         return []
 
     class Coll:
-        def load_collection(self, c):
+        # The collection is scoped by profile now, so the profile id arrives as
+        # a second argument. Recording it is how these tests assert the pool is
+        # not shared across profiles.
+        scopes = []
+
+        def load_collection(self, c, profile_id=None):
+            Coll.scopes.append(profile_id)
             return {"keywords": [], "prompts": []}
 
-        def harvest_active(self, c):
+        def harvest_active(self, c, profile_id=None):
+            Coll.scopes.append(profile_id)
             return False
 
         def save_keyword(self, *a, **k): pass
@@ -375,8 +383,62 @@ def test_cycles():
         check("existing mode never generates", calls["gen"] == g0)
         check("existing mode searches once and stops", calls["searches"] == [provided],
               str(calls["searches"]))
+
+        # The pool is per-profile now. Two profiles must not read each other's
+        # keywords — that is what made "full stack AI systems lead" show up in a
+        # Python developer run.
+        check("collection was read for this run's profile",
+              Coll.scopes and all(s == PROFILE for s in Coll.scopes),
+              str(sorted(set(Coll.scopes))))
     finally:
         for n, f in saved.items():
+            setattr(om, n, f)
+
+    # ── the three bugs that made a run silently skip the user's keywords ──
+    print("\n[11b] a run never drops the keywords the user typed")
+
+    seen_scrape = {}
+
+    async def scrape2(filters, headless=False, context=None, run_seen_ids=None,
+                      profile_id=None, request_id=None, parallel_workers=1):
+        seen_scrape["keywords"] = list(filters.keywords)
+        seen_scrape["workers"] = parallel_workers
+        seen_scrape["request_id"] = request_id
+        return []
+
+    class HarvestColl(Coll):
+        def harvest_active(self, c, profile_id=None):
+            return True
+
+        def load_collection(self, c, profile_id=None):
+            return {"keywords": [types.SimpleNamespace(keyword="pool keyword")], "prompts": []}
+
+    class T2:
+        reuse_after_days, reason = 3, "t"
+
+    saved2 = {n: getattr(om, n) for n in ("browser_session", "run_scrape", "coll")}
+    om.browser_session, om.run_scrape = browser, scrape2
+    om.coll = HarvestColl()
+    try:
+        cfg4 = RunConfig(profile=UserProfile(background="py"), profile_id=PROFILE,
+                         filters=ScrapingFilters(category=cycle_category, keywords=provided),
+                         parallel_workers=3, request_id="req_H")
+        asyncio.run(om.run_orchestrator(cfg4, headless=False, max_cycles=1,
+                                        run_mode="generate", run_id="run_H"))
+        check("harvest mode still searches the user's keywords",
+              all(k in seen_scrape.get("keywords", []) for k in provided),
+              str(seen_scrape.get("keywords")))
+        check("harvest mode still searches its own pool",
+              "pool keyword" in seen_scrape.get("keywords", []),
+              str(seen_scrape.get("keywords")))
+        check("parallel_workers reaches the scraper", seen_scrape.get("workers") == 3,
+              str(seen_scrape.get("workers")))
+        # Without this the deferred bucket is never loaded and parked ads get
+        # judged again on every run.
+        check("request_id reaches the scraper",
+              seen_scrape.get("request_id") == "req_H", str(seen_scrape.get("request_id")))
+    finally:
+        for n, f in saved2.items():
             setattr(om, n, f)
 
 

@@ -247,6 +247,41 @@ export function RunDetail({ runId }) {
         </div>
       )}
 
+      {run.keywords_not_searched?.length > 0 && (
+        <div
+          className="rounded-xl border border-yellow-500/50 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-700 dark:text-yellow-400"
+          role="status"
+        >
+          <span className="font-semibold">Not searched:</span>{' '}
+          {run.keywords_not_searched.map((k) => `“${k}”`).join(', ')}
+          . The run finished without searching these.
+        </div>
+      )}
+
+      {(run.note || run.profile_about) && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-border bg-muted/30 px-4 py-2.5 text-xs text-muted-foreground">
+          {run.profile_about && (
+            <span>
+              Profile:{' '}
+              <span className="font-medium text-foreground">{run.profile_about}</span>
+              {run.profile_is_active === false && ' (not the active one)'}
+            </span>
+          )}
+          {run.parallel_workers > 1 && (
+            <span>
+              {run.parallel_workers} keywords at a time — {run.parallel_workers} tabs
+            </span>
+          )}
+          {run.run_mode && <span>Mode: {run.run_mode === 'generate' ? 'AI keywords' : 'your keywords only'}</span>}
+        </div>
+      )}
+
+      {run.note && (
+        <div className="rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+          {run.note}
+        </div>
+      )}
+
       {isLive && (
         <Card>
           <CardContent className="space-y-3 py-5">
