@@ -72,6 +72,10 @@ HARD_STEP_CAP_MULTIPLIER = 3.0
 # keyword set a burst of known cards is normal at the top of a result page,
 # and bailing there would under-collect exactly when dedup is doing its job.
 ALL_KNOWN_STEPS_BEFORE_EXIT = 4
+# Consecutive steps where the results pane refused to move at all. Unlike a
+# quiet step this is a fault, not a conclusion, so it does not count toward the
+# quiet budget — it triggers a reload instead.
+STUCK_SCROLL_LIMIT = 3
 
 
 def _scroll_budget(estimate: int | None) -> int:
@@ -249,6 +253,7 @@ async def _scrape_keyword(
     dom_cards: int | None = None
     waited: list[int] = []
     distance_used: list[int] = []
+    stuck_scrolls = 0
 
     logger.info(
         "%s🎯 Crawl plan: estimate~%s, target %s unique, quiet budget %s, cap %d steps",
@@ -282,7 +287,10 @@ async def _scrape_keyword(
             # Yield that is entirely already-decided cannot improve the run, so
             # track it separately from "no cards at all".
             all_known_steps = all_known_steps + 1 if already_known else 0
-        else:
+        elif not stuck_scrolls:
+            # Only a step that actually scrolled can be evidence of the bottom.
+            # Counting a stuck tab toward this budget ends the keyword for the
+            # wrong reason, and the crawl reports it as searched.
             quiet_steps += 1
 
         # Early exit: this keyword is only turning up ads we already have a
@@ -329,6 +337,32 @@ async def _scrape_keyword(
             dom_cards = timing["count"]
         waited.append(timing["waited_ms"])
         distance_used.append(pacer.distance)
+
+        if not timing.get("moved", True):
+            stuck_scrolls += 1
+            logger.warning(
+                "%s🪦 %r: the results pane stopped responding (%d step(s) so far)",
+                tag, keyword, stuck_scrolls,
+            )
+            if stuck_scrolls >= STUCK_SCROLL_LIMIT:
+                # Recovering means putting the tab back in a known state. A
+                # reload is the only thing that clears a dialog Playwright
+                # cannot click, and it costs one navigation rather than the
+                # ads already harvested, which stay in `seen_ids`.
+                logger.warning(
+                    "%s♻️  %r: %d stuck scroll(s) — reloading the tab and continuing",
+                    tag, keyword, stuck_scrolls,
+                )
+                try:
+                    await page.reload(wait_until="domcontentloaded")
+                    await search_keyword(page, keyword, filters, dismiss_cookies=True)
+                    await apply_filters(page, filters)
+                    stuck_scrolls = 0
+                    dom_cards = None
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("%s💥 %r: reload failed (%s) — ending this keyword",
+                                 tag, keyword, exc)
+                    break
 
     if not keyword_ads and not empty_page:
         # Nothing matched the selectors — dump the results page so the card

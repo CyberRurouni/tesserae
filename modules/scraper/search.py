@@ -101,6 +101,48 @@ COOKIE_DISMISS = (
     "button:has-text('Allow essential cookies')"
 )
 RESULTS_CONTAINER = "[role='main']"
+# Meta's results live in their own scrollable div, not the document. The mouse
+# wheel is dispatched at whatever sits under the CURSOR, so a wheel aimed at
+# the page body scrolls a header or a sidebar and loads nothing at all — the
+# crawl then sees zero new cards and concludes it has reached the end. This
+# script reads the scroll offset of every scrollable element on the page and
+# reports the largest, which is the results pane.
+SCROLL_PROBE_JS = """
+() => {
+  let best = 0, found = false;
+  for (const el of document.querySelectorAll('*')) {
+    if (el.scrollHeight > el.clientHeight + 40) {
+      const style = window.getComputedStyle(el);
+      if (/(auto|scroll|overlay)/.test(style.overflowY)) {
+        found = true;
+        best = Math.max(best, Math.round(el.scrollTop));
+      }
+    }
+  }
+  return { offset: found ? best : Math.round(window.scrollY), pane: found };
+}
+"""
+
+# Nudge the pane itself, for when the wheel has missed. Scrolling the element
+# directly does not depend on where the cursor is.
+SCROLL_PANE_JS = """
+([dy]) => {
+  let target = null, best = 0;
+  for (const el of document.querySelectorAll('*')) {
+    if (el.scrollHeight > el.clientHeight + 40) {
+      const style = window.getComputedStyle(el);
+      if (/(auto|scroll|overlay)/.test(style.overflowY)
+          && el.scrollHeight > best) {
+        best = el.scrollHeight;
+        target = el;
+      }
+    }
+  }
+  if (target) { target.scrollTop += dy; return target.scrollTop; }
+  window.scrollBy(0, dy);
+  return Math.round(window.scrollY);
+}
+"""
 
 
 async def _first_visible(page: Page, selector: str, timeout_ms: int = 3000) -> Locator | None:
@@ -420,6 +462,23 @@ async def _dom_card_count(page: Page) -> int:
     return await page.locator("span").filter(has_text=LIBRARY_ID_SPAN_PATTERN).count()
 
 
+async def _scroll_offset(page: Page) -> int:
+    """Scroll offset of Meta's results pane, or the document if there isn't one."""
+    try:
+        probe = await page.evaluate(SCROLL_PROBE_JS)
+        return int(probe.get("offset") or 0) if isinstance(probe, dict) else 0
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+async def _scroll_pane_directly(page: Page, distance: int) -> int:
+    """Scroll the scrollable pane by JS. Returns the new offset."""
+    try:
+        return int(await page.evaluate(SCROLL_PANE_JS, [distance]) or 0)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 async def scroll_step(
     page: Page,
     distance: int = SCROLL_DISTANCE_PX,
@@ -427,33 +486,64 @@ async def scroll_step(
     ceiling_ms: int = SCROLL_CEILING_MS,
 ) -> dict:
     """
-    One wheel step down the results pane, then wait for the content it asked for.
+    Scroll the results pane, verify it moved, then wait for the cards it asked for.
 
-    The old version was `wheel()` followed by a flat `wait_for_timeout(1500)`.
-    That sleep is paid on every step regardless of whether anything arrived —
-    and when the next batch of cards is already rendered, which it usually is,
-    it is 1.5s of doing nothing. Measured across a 110-result keyword that was
-    61s of the 310s crawl spent asleep.
+    Two problems this fixes, both of which looked identical from the outside —
+    the run just stopped finding ads.
 
-    Waiting for the card count to actually grow is strictly better than tuning
-    the constant down. Fast render returns immediately; slow render waits
-    LONGER rather than less. The only case that reaches the ceiling is the end
-    of the results, where nothing is coming and the caller's quiet-step
-    counter decides what happens next.
+    1. The wheel was dispatched without ever positioning the cursor over the
+       pane. Meta's results live in their own scrollable div, so a wheel aimed
+       at the page body scrolls a header or sidebar and loads nothing. Nothing
+       checked, so the crawl read that as "end of results".
 
-    `baseline` is the card count before the scroll. Passing None falls back to
-    a plain short sleep, for callers with no count to compare against.
+    2. A scroll that genuinely did not move is not evidence of the bottom. It
+       is evidence of a stuck tab, and counting it toward the quiet-step
+       budget ends the keyword for the wrong reason. `moved` is reported back
+       so the caller can tell those two cases apart.
 
-    Returns timing so the crawl loop can log where the time went.
+    Recovery ladder: wheel over the cursor as positioned -> re-aim at the pane
+    and wheel again -> scroll the pane by JS. Only if all three fail is the
+    scroll reported as not moving.
     """
     import time
 
     started = time.monotonic()
+    before = await _scroll_offset(page)
+
     await page.mouse.wheel(0, distance)
+    moved = await _scroll_offset(page) > before
+
+    if not moved:
+        # The cursor is not over the pane. Aim at it and try again.
+        try:
+            pane = page.locator(RESULTS_CONTAINER).first
+            if await pane.count():
+                box = await pane.bounding_box()
+                if box:
+                    await page.mouse.move(
+                        box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+                    )
+                    await page.wait_for_timeout(50)
+                    await page.mouse.wheel(0, distance)
+                    moved = await _scroll_offset(page) > before
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("⚠️ Could not aim at the results pane: %s", exc)
+
+    if not moved:
+        new_offset = await _scroll_pane_directly(page, distance)
+        moved = new_offset > before
+
+    if not moved:
+        logger.warning(
+            "🪦 Scroll did not move the results pane (offset stuck at %d). "
+            "The tab may be stuck or showing a dialog.",
+            before,
+        )
+        return {"waited_ms": 0, "grew": False, "count": baseline, "moved": False}
 
     if baseline is None:
         await page.wait_for_timeout(SCROLL_FLOOR_MS)
-        return {"waited_ms": SCROLL_FLOOR_MS, "grew": True, "count": None}
+        return {"waited_ms": SCROLL_FLOOR_MS, "grew": True, "count": None, "moved": True}
 
     polls = 0
     count = baseline
@@ -478,7 +568,9 @@ async def scroll_step(
         # Carried forward as the next step's baseline, so the count this call
         # already made does not have to be made again.
         "count": count,
+        "moved": True,
     }
+
 
 
 class ScrollPacer:

@@ -29,6 +29,7 @@ browser_profile/
 
 # Runtime data — regenerate by running a search
 data/
+logs/
 exports/
 dump.rdb
 

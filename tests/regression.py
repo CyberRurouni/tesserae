@@ -28,6 +28,14 @@ import tempfile
 import types
 from pathlib import Path
 
+
+def _truthy(value):
+    """An already-resolved stand-in for a coroutine the scraper awaits."""
+    fut = asyncio.get_event_loop_policy().new_event_loop().create_future()
+    fut.set_result(value)
+    return fut
+
+
 # Must happen before genesis.config / redis_utils are imported anywhere.
 _SANDBOX = tempfile.mkdtemp(prefix="tesserae-regression-")
 os.environ["TESSERAE_DATA_DIR"] = _SANDBOX
@@ -227,7 +235,7 @@ def test_scraper():
 
     async def scroll(page, distance=4000, baseline=None, ceiling_ms=1500):
         scrolls.append(distance)
-        return {"waited_ms": 100, "grew": True, "count": (baseline or 0) + 5}
+        return {"waited_ms": 100, "grew": True, "count": (baseline or 0) + 5, "moved": True}
 
     async def search(page, keyword, filters, dismiss_cookies=False):
         return None
@@ -322,6 +330,52 @@ def test_scraper():
 
     check("the floor is a real floor",
           ScrollPacer().reward(0) >= SCROLL_DISTANCE_MIN_PX // 2)
+
+    # A pane that will not scroll is a fault, not a finding. Counting it toward
+    # the quiet budget ends the keyword and reports it as searched — the exact
+    # "it just stopped" symptom, and the reason the budget must ignore it.
+    print("\n[10c] a stuck pane does not end a keyword")
+    import modules.scraper.main as sm2
+    from core.schemas.filters import ScrapingFilters as SF
+
+    stuck_calls = {"n": 0}
+
+    async def stuck_scroll(page, distance=4000, baseline=None, ceiling_ms=1500):
+        stuck_calls["n"] += 1
+        # Moved the first two times, then the pane stopped responding entirely.
+        if stuck_calls["n"] > 2:
+            return {"waited_ms": 0, "grew": False, "count": baseline, "moved": False}
+        return {"waited_ms": 100, "grew": True, "count": (baseline or 0) + 5, "moved": True}
+
+    async def no_ads(page, source_keyword, seen_ids=None):
+        return []
+
+    saved_s = {n: getattr(sm2, n) for n in (
+        "scroll_step", "extract_ads_from_page", "empty_results",
+        "read_results_estimate", "search_keyword", "apply_filters",
+        "collect_page_html",
+    )}
+    sm2.scroll_step = stuck_scroll
+    sm2.extract_ads_from_page = no_ads
+    sm2.empty_results = lambda *a, **k: _truthy(False)
+    sm2.read_results_estimate = lambda *a, **k: _truthy(100)
+    sm2.search_keyword = lambda *a, **k: _truthy(None)
+    sm2.apply_filters = lambda *a, **k: _truthy(None)
+    sm2.collect_page_html = lambda *a, **k: _truthy(None)
+    from modules.scraper.seen import RunSeenIds as _RSI
+    try:
+        out = asyncio.run(sm2._scrape_keyword(
+            object(), "stuck keyword", SF(category="career_jobs", keywords=["stuck keyword"]),
+            None, "career_jobs", _RSI(), None, None, None, set(),
+            asyncio.Lock(), is_first_keyword=True,
+        ))
+        # No ads either way; what matters is that it kept trying rather than
+        # declaring the bottom after the quiet budget on a dead pane.
+        check("a stuck pane is retried, not treated as the bottom",
+              stuck_calls["n"] > 3, f"{stuck_calls['n']} scroll attempts")
+    finally:
+        for n, f in saved_s.items():
+            setattr(sm2, n, f)
 
 
 # ── 6. cycle semantics unchanged ────────────────────────────────────────────

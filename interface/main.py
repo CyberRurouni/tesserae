@@ -18,6 +18,7 @@ import os
 import socket
 import sys
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Optional, Union
 
@@ -34,6 +35,13 @@ from interface.verdicts_api import router as verdicts_router
 logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# Logs land here as well as on stdout. The file is the reliable one: stdout
+# depends on how the process was started, and a piped or detached process
+# shows nothing useful. Overridable so a test or a second instance can send
+# them somewhere harmless.
+LOG_FILE = Path(os.getenv("TESSERAE_LOG_FILE") or (ROOT / "logs" / "tesserae.log"))
+
 DATA_DIR = ROOT / "data" / "ads"
 PROFILE_DIR = ROOT / "data" / "profile"
 
@@ -249,12 +257,9 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
         state["phase"] = "starting"
         state["harvested_total"] = 0
         state["keywords_harvested"] = []
-        # A browser run is not abandoned by closing the tab, so say so before
-        # the fact rather than after it.
-        state["log_hint"] = (
-            "Application logs go to the terminal running the backend, not the "
-            "browser. They name every keyword, worker and verdict."
-        )
+        # A browser run is not abandoned by closing the tab, so say where the
+        # evidence is before the fact rather than after it.
+        state["log_hint"] = f"Application logs: {LOG_FILE}"
         # Record what the run will actually do, before it does it. Three
         # separate bugs looked identical from the UI — a run that finished with
         # none of your keywords searched — and the run state was the only place
@@ -519,25 +524,53 @@ def find_free_port(start_port: int = 8000, max_port: int = 9000) -> int:
 
 def configure_logging() -> None:
     """
-    Send application logs to stdout, once, whatever started the process.
+    Send application logs to stdout AND to a file, once, whatever started us.
 
-    This used to live under `if __name__ == "__main__"`, so running under
-    `uvicorn interface.main:app` — the documented way, and what the frontend
-    proxy expects — produced no application output at all. Only uvicorn's
-    access log appeared. Three separate bugs were reported as "it just didn't
-    search my keywords" with nothing to go on, and the lines that would have
-    said why were being thrown away.
+    This used to live under `if __name__ == "__main__"`, so `uvicorn
+    interface.main:app` produced no application output at all — only uvicorn's
+    access log. It was then moved to import time and to stdout alone, which
+    still left logs invisible in two real situations: output piped to another
+    process (block-buffered, so lines appear in 4KB lumps or never), and a
+    backend started from an IDE or a GUI launcher whose console is not
+    attached to the process that serves the browser.
+
+    The file removes both problems, because it does not care how the process
+    was started or where its stdout went. stdout stays for the terminal case,
+    where watching the crawl live is genuinely the better experience.
+
+    Rotation is bounded: this writes per scroll step and per verdict, and an
+    unbounded log in a repo is a liability rather than a diagnostic.
     """
     root = logging.getLogger()
-    if any(isinstance(h, logging.StreamHandler) and
-           getattr(h, "_tesserae", False) for h in root.handlers):
+    if any(getattr(h, "_tesserae", False) for h in root.handlers):
         return
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(
-        logging.Formatter("%(asctime)s | %(levelname)-7s | %(name)-28s | %(message)s")
+
+    fmt = logging.Formatter(
+        "%(asctime)s | %(levelname)-7s | %(name)-28s | %(message)s"
     )
-    handler._tesserae = True  # type: ignore[attr-defined]
-    root.addHandler(handler)
+
+    console = logging.StreamHandler(sys.stdout)
+    console.setFormatter(fmt)
+    console._tesserae = True  # type: ignore[attr-defined]
+    root.addHandler(console)
+
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        rotating = RotatingFileHandler(
+            LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3, encoding="utf-8"
+        )
+        rotating.setFormatter(fmt)
+        rotating._tesserae = True  # type: ignore[attr-defined]
+        root.addHandler(rotating)
+    except OSError as exc:  # a read-only checkout must still be able to run
+        console.handle(
+            logging.LogRecord(
+                "tesserae", logging.WARNING, __file__, 0,
+                f"Could not open {LOG_FILE}: {exc} — logging to terminal only",
+                None, None,
+            )
+        )
+
     root.setLevel(os.getenv("TESSERAE_LOG_LEVEL", "INFO").upper())
 
 
