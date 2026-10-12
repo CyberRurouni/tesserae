@@ -287,16 +287,31 @@ export function RunDetail({ runId }) {
           <CardContent className="space-y-3 py-5">
             <div className="flex items-center justify-between text-sm">
               <span className="font-medium text-foreground">
-                {run.current_keyword ? `Searching “${run.current_keyword}”…` : 'Searching the Meta Ad Library…'}
+                {run.current_keyword
+                  ? `${run.phase === 'judging' ? 'Judging' : 'Scraping'} “${run.current_keyword}”…`
+                  : run.phase === 'judging'
+                    ? 'Judging the ads that were found…'
+                    : 'Searching the Meta Ad Library…'}
               </span>
               <span className="font-semibold tabular-nums text-primary">{run.progress || 0}%</span>
             </div>
             <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
               <div className="h-full rounded-full bg-gradient-to-r from-primary to-glow transition-all duration-500" style={{ width: `${Math.max(4, run.progress || 0)}%` }} />
             </div>
-            <p className="text-xs text-muted-foreground">
-              Keep this page open — results appear below as soon as ads are accepted.
-            </p>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+              {run.harvested_total > 0 && (
+                <span className="font-medium text-foreground">
+                  {run.harvested_total} ad{run.harvested_total === 1 ? '' : 's'} scraped so far
+                </span>
+              )}
+              {run.keywords_harvested?.length > 0 && (
+                <span>
+                  {run.keywords_harvested.length} of {run.total_keywords || '?'} keyword
+                  {run.total_keywords === 1 ? '' : 's'} finished
+                </span>
+              )}
+              {run.log_hint && <span className="ml-auto opacity-70">{run.log_hint}</span>}
+            </div>
           </CardContent>
         </Card>
       )}

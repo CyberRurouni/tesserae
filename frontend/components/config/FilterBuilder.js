@@ -1,10 +1,12 @@
 'use client';
 
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/Card';
 import { Select } from '@/components/ui/Select';
 import { cn } from '@/lib/utils';
+import { clearDraft, readDraft, writeDraft } from '@/lib/draft';
+import HeuristicsPanel from '@/components/config/HeuristicsPanel';
 
 const PLATFORMS = [
   { value: 'facebook', label: 'Facebook', hint: 'Feed & video ads' },
@@ -50,6 +52,11 @@ const INITIAL = {
   cycles: 3,
   run_until_complete: false,
   parallel_workers: 1,
+  heuristic_patterns: {
+    require_ad_text_patterns: [],
+    require_any_ad_text_patterns: [],
+    exclude_ad_text_patterns: [],
+  },
 };
 
 function formatKeywordPreview(keywords, max = 3) {
@@ -215,7 +222,11 @@ function KeywordInput({ keywords, onChange, error }) {
 
 export default function FilterBuilder({ onStart, onRunModeChange, initialData }) {
   const initial = useMemo(() => {
-    const merged = { ...INITIAL, ...(initialData || {}) };
+    // Draft first, server's last-run settings second. The draft is the newer
+    // of the two by construction — it only exists because you changed
+    // something and had not started a run yet — so it wins where they differ.
+    const draft = readDraft();
+    const merged = { ...INITIAL, ...(initialData || {}), ...(draft || {}) };
 
     // Restored selections arrive with array-valued platform/language fields;
     // native <select> needs a scalar, so flatten them here.
@@ -231,9 +242,9 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
     return {
       ...merged,
       platforms,
-      // Keywords are deliberately NOT restored. They go stale fast, so the box
-      // always starts empty and the last set is opt-in via the checkbox.
-      keywords: [],
+      // Keywords come back from the draft when there is one, and otherwise
+      // start empty so a stale set is opt-in via the checkbox.
+      keywords: Array.isArray(merged.keywords) ? merged.keywords : [],
       languages: restoredLanguages[0] || 'all',
       ad_age_hours: merged.ad_age_hours == null ? '' : String(merged.ad_age_hours),
       cycles: Number(merged.cycles) || INITIAL.cycles,
@@ -271,6 +282,20 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
   const [errors, setErrors] = useState({});
   const [isStarting, setIsStarting] = useState(false);
   const [useLastKeywords, setUseLastKeywords] = useState(false);
+  const [draftRestored, setDraftRestored] = useState(() => Boolean(readDraft()));
+
+  // Persist on every change. This is what makes visiting another page safe:
+  // the form remounts from the draft instead of from the last run's settings.
+  useEffect(() => {
+    writeDraft(formData);
+  }, [formData]);
+
+  const discardDraft = useCallback(() => {
+    clearDraft();
+    setDraftRestored(false);
+    setFormData(initial);
+    setUseLastKeywords(false);
+  }, [initial]);
 
   const update = useCallback((field, value) => {
     setFormData((prev) => ({ ...prev, [field]: value }));
@@ -330,6 +355,7 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
   }, [formData, onStart, validate]);
 
   return (
+    <>
     <Card className="animate-fade-up">
       <CardHeader>
         <div className="flex items-start gap-3">
@@ -622,5 +648,21 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
         </Button>
       </CardFooter>
     </Card>
+
+    {draftRestored && (
+      <p className="text-xs text-muted-foreground">
+        Your unsaved search settings were kept while you were away.{' '}
+        <button type="button" onClick={discardDraft} className="underline underline-offset-4 hover:text-foreground">
+          Start fresh
+        </button>{' '}
+        to go back to the last run&apos;s settings.
+      </p>
+    )}
+
+    <HeuristicsPanel
+      patterns={formData.heuristic_patterns}
+      onChange={(next) => update('heuristic_patterns', next)}
+    />
+    </>
   );
 }

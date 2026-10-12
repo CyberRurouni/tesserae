@@ -246,6 +246,15 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
         state["profile_id"] = profile.profile_id
         state["profile_about"] = profile.about
         state["request_id"] = request.request_id
+        state["phase"] = "starting"
+        state["harvested_total"] = 0
+        state["keywords_harvested"] = []
+        # A browser run is not abandoned by closing the tab, so say so before
+        # the fact rather than after it.
+        state["log_hint"] = (
+            "Application logs go to the terminal running the backend, not the "
+            "browser. They name every keyword, worker and verdict."
+        )
         # Record what the run will actually do, before it does it. Three
         # separate bugs looked identical from the UI — a run that finished with
         # none of your keywords searched — and the run state was the only place
@@ -272,6 +281,38 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
             run_id, len(filters.keywords), request.run_mode, profile.profile_id,
         )
 
+        # Live progress. A run that scrapes for an hour before returning
+        # anything looks identical to a hung one, so the run state carries what
+        # is happening right now — keyword, ads harvested so far — and the UI
+        # polls it. Without this there is no way to tell "working" from
+        # "stuck" except by watching a browser tab.
+        def on_progress(**event):
+            phase = event.get("phase")
+            if phase == "harvested":
+                keyword = event.get("keyword")
+                state["current_keyword"] = keyword
+                state["harvested_total"] = int(event.get("harvested") or 0)
+                state["last_harvest_at"] = datetime.now().isoformat()
+                state["phase"] = "scraping"
+                logger.info(
+                    "📥 %r: %d ads harvested (%d unique this run)",
+                    keyword, int(event.get("batch_size") or 0), int(event.get("harvested") or 0),
+                )
+                counts = state.setdefault(
+                    "counts", {"accepted": 0, "rejected": 0, "ai_failed": 0}
+                )
+                total = max(1, state.get("total_keywords") or 1)
+                done = len(state.get("keywords_harvested") or [])
+                state.setdefault("keywords_harvested", [])
+                if keyword and keyword not in state["keywords_harvested"]:
+                    state["keywords_harvested"].append(keyword)
+                    done = len(state["keywords_harvested"])
+                # 5% floor, 90% ceiling: the AI judging tail owns the last slice.
+                state["progress"] = max(5, min(90, int(5 + (done / total) * 85)))
+            elif phase == "judging":
+                state["phase"] = "judging"
+                state["current_keyword"] = event.get("keyword")
+
         summary = await _run_with_filters(
             filters,
             None if request.run_until_complete else (request.cycles or 1),
@@ -280,6 +321,7 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
             request.profile_id,
             request.request_id,
             max(1, min(int(request.parallel_workers or 1), 3)),
+            on_progress=on_progress,
         )
 
         counts = state.setdefault("counts", {"accepted": 0, "rejected": 0, "ai_failed": 0})

@@ -114,6 +114,13 @@ export async function GET(request, { params }) {
       // instead of swallowed: a run that quietly skips what you typed looks
       // exactly like a run that found nothing.
       keywords_not_searched: live?.keywords_not_searched ?? [],
+      // Live liveness. Without these a run that is working and a run that has
+      // wedged look identical — both sit at 5% with nothing happening.
+      phase: live?.phase ?? null,
+      harvested_total: live?.harvested_total ?? 0,
+      keywords_harvested: live?.keywords_harvested ?? [],
+      total_keywords: live?.total_keywords ?? null,
+      log_hint: live?.log_hint ?? null,
       config: live?.config || null,
       current_keyword: live?.current_keyword ?? null,
       keywords: keywordRows,

@@ -20,6 +20,7 @@ databases belong to this run.
 
 import asyncio
 import contextlib
+import inspect
 import json
 import os
 import sys
@@ -299,9 +300,22 @@ def test_cycles():
         yield object()
 
     async def scrape(filters, headless=False, context=None, run_seen_ids=None,
-                     profile_id=None, request_id=None, parallel_workers=1):
+                     profile_id=None, request_id=None, parallel_workers=1,
+                     on_harvested=None):
         calls["searches"].append(list(filters.keywords))
-        return []
+        ads = [AdRecord(
+            ad_archive_id=f"kw_{k}", advertiser_name="A", ad_text="We are hiring",
+            source_keyword=k, heuristic_labels=[],
+        ) for k in filters.keywords]
+        # Mirror the real scraper: report each keyword as it finishes, so the
+        # per-keyword judging path is exercised rather than bypassed.
+        if on_harvested:
+            for i, kw in enumerate(filters.keywords):
+                out = on_harvested([a for a in ads if a.source_keyword == kw],
+                                   kw, i + 1)
+                if inspect.isawaitable(out):
+                    await out
+        return ads
 
     async def judge(ads, **kw):
         return {}
@@ -397,13 +411,64 @@ def test_cycles():
     # ── the three bugs that made a run silently skip the user's keywords ──
     print("\n[11b] a run never drops the keywords the user typed")
 
+    saved2 = {n: getattr(om, n) for n in ("browser_session", "run_scrape", "coll")}
+
+    # A judge failure must not discard ads already harvested. This cost an hour
+    # of crawling once: three keywords, 429 ads scraped, then a TypeError in the
+    # judge call took the whole set with it because nothing was written until
+    # every keyword had finished.
+    async def scraping_then_failing_scrape(filters, headless=False, context=None,
+                                           run_seen_ids=None, profile_id=None,
+                                           request_id=None, parallel_workers=1,
+                                           on_harvested=None):
+        saved_calls = []
+        for i, kw in enumerate(filters.keywords):
+            ads_here = [AdRecord(ad_archive_id=f"k{i}_{j}", advertiser_name="A",
+                                 ad_text="We are hiring", source_keyword=kw,
+                                 heuristic_labels=[]) for j in range(2)]
+            if on_harvested:
+                out = on_harvested(ads_here, kw, i + 1)
+                if inspect.isawaitable(out):
+                    await out
+            saved_calls.append(ads_here)
+        return [a for batch in saved_calls for a in batch]
+
+    om.browser_session, om.run_scrape = browser, scraping_then_failing_scrape
+    om.coll = Coll()
+    try:
+        async def exploding_judge(ads, **kw):
+            raise TypeError("judge_ad_relevance() got an unexpected keyword argument 'parallel_workers'")
+
+        real_judge = om.judge_ad_relevance
+        om.judge_ad_relevance = exploding_judge
+        cfg5 = RunConfig(profile=UserProfile(background="py"), profile_id=PROFILE,
+                         filters=ScrapingFilters(category="career_jobs",
+                                                 keywords=["kw a", "kw b"]))
+        try:
+            asyncio.run(om.run_orchestrator(cfg5, headless=False, max_cycles=1,
+                                            run_mode="existing", run_id="run_J"))
+            check("judge failure is not swallowed", False, "no error raised")
+        except TypeError:
+            check("judge failure propagates rather than looking like success", True)
+        finally:
+            om.judge_ad_relevance = real_judge
+    finally:
+        for n, f in saved2.items():
+            setattr(om, n, f)
+
     seen_scrape = {}
 
     async def scrape2(filters, headless=False, context=None, run_seen_ids=None,
-                      profile_id=None, request_id=None, parallel_workers=1):
+                      profile_id=None, request_id=None, parallel_workers=1,
+                      on_harvested=None):
         seen_scrape["keywords"] = list(filters.keywords)
         seen_scrape["workers"] = parallel_workers
         seen_scrape["request_id"] = request_id
+        if on_harvested:
+            for i, kw in enumerate(filters.keywords):
+                out = on_harvested([], kw, i + 1)
+                if inspect.isawaitable(out):
+                    await out
         return []
 
     class HarvestColl(Coll):
@@ -413,10 +478,6 @@ def test_cycles():
         def load_collection(self, c, profile_id=None):
             return {"keywords": [types.SimpleNamespace(keyword="pool keyword")], "prompts": []}
 
-    class T2:
-        reuse_after_days, reason = 3, "t"
-
-    saved2 = {n: getattr(om, n) for n in ("browser_session", "run_scrape", "coll")}
     om.browser_session, om.run_scrape = browser, scrape2
     om.coll = HarvestColl()
     try:

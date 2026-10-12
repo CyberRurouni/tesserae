@@ -7,6 +7,7 @@ packaged in this city's warehouses (browser.py / search.py / extract.py).
 """
 
 import asyncio
+import inspect
 import logging
 
 from playwright.async_api import BrowserContext, Page
@@ -130,6 +131,7 @@ async def run_scrape(
     profile_id: str | None = None,
     request_id: str | None = None,
     parallel_workers: int = 1,
+    on_harvested=None,
 ) -> list[AdRecord]:
     """
     Full scrape pass: for each keyword, search the library, extract ads,
@@ -174,11 +176,11 @@ async def run_scrape(
     if context is not None:
         return await _scrape_on(context, filters, category, cat_id, run_seen,
                                  filter_index, profile_id, request_id,
-                                 parallel_workers)
+                                 parallel_workers, on_harvested)
     async with browser_session(headless=headless) as owned:
         return await _scrape_on(owned, filters, category, cat_id, run_seen,
                                 filter_index, profile_id, request_id,
-                                parallel_workers)
+                                parallel_workers, on_harvested)
 
 
 async def _scrape_keyword(
@@ -355,6 +357,21 @@ def _chunk(items: list[str], buckets: int) -> list[list[str]]:
     return [chunk for chunk in out if chunk]
 
 
+async def _report_harvest(on_harvested, batch: list, keyword: str, total_unique: int) -> None:
+    """
+    Hand a finished keyword's ads to the caller.
+
+    Never allowed to break the run: a reporting hook that raises would lose the
+    crawl it was reporting on, which is the opposite of what it is for.
+    """
+    try:
+        result = on_harvested(batch, keyword, total_unique)
+        if inspect.isawaitable(result):
+            await result
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("⚠️ Harvest reporting failed for %r (%s) — continuing", keyword, exc)
+
+
 async def _scrape_on(
     context: BrowserContext,
     filters: ScrapingFilters,
@@ -365,6 +382,7 @@ async def _scrape_on(
     profile_id: str | None = None,
     request_id: str | None = None,
     parallel_workers: int = 1,
+    on_harvested=None,
 ) -> list[AdRecord]:
     """
     Crawl every keyword on an existing context.
@@ -393,11 +411,17 @@ async def _scrape_on(
         try:
             fresh: list[AdRecord] = []
             for idx, keyword in enumerate(keywords):
-                fresh.extend(await _scrape_keyword(
+                batch = await _scrape_keyword(
                     page, keyword, filters, category, cat_id, run_seen, filter_index,
                     profile_id, request_id, seen_ids, extract_lock,
                     is_first_keyword=(idx == 0),
-                ))
+                )
+                fresh.extend(batch)
+                # Report each keyword the moment it lands. A run that scrapes
+                # for an hour before returning anything gives the UI nothing to
+                # show, and a crash anywhere in that hour loses every ad.
+                if on_harvested and batch:
+                    await _report_harvest(on_harvested, batch, keyword, len(seen_ids))
         finally:
             await page.close()
     else:
@@ -417,12 +441,15 @@ async def _scrape_on(
             label = f"w{idx + 1}"
             for j, keyword in enumerate(chunk):
                 try:
-                    out.extend(await _scrape_keyword(
+                    batch = await _scrape_keyword(
                         pages[idx], keyword, filters, category, cat_id, run_seen,
                         filter_index, profile_id, request_id, seen_ids,
                         extract_lock, is_first_keyword=(idx == 0 and j == 0),
                         worker_label=label,
-                    ))
+                    )
+                    out.extend(batch)
+                    if on_harvested and batch:
+                        await _report_harvest(on_harvested, batch, keyword, len(seen_ids))
                 except Exception as exc:  # noqa: BLE001 - one bad keyword must not kill the run
                     logger.error("💥 %s keyword %r failed: %s", label, keyword, exc, exc_info=True)
             return out

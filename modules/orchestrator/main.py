@@ -26,6 +26,7 @@ searched keywords and prompts carry their TTLs, expired territories
 are simply open again.
 """
 
+import inspect
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -86,6 +87,7 @@ async def run_orchestrator(
     run_id: str | None = None,
     profile_id: str | None = None,
     request_id: str | None = None,
+    on_progress=None,
 ) -> dict:
     """
     Run the keyword lifecycle.
@@ -154,7 +156,8 @@ async def run_orchestrator(
             if user_keywords:
                 logger.info("🔍 Searching %d user-provided keyword(s): %s", len(user_keywords), user_keywords)
                 relevant, _, _ = await _search_and_judge(
-                    user_keywords, config, additional_filters, context, run_id, searched_keywords, run_seen,
+                    user_keywords, config, additional_filters, context, run_id,
+                    searched_keywords, run_seen, on_progress,
                 )
                 totals["cycles"] = 1
                 totals["keywords_searched"] += len(user_keywords)
@@ -193,7 +196,8 @@ async def run_orchestrator(
                 if not round_keywords:
                     return totals
                 relevant, _, _ = await _search_and_judge(
-                    round_keywords, config, additional_filters, context, run_id, searched_keywords, run_seen,
+                    round_keywords, config, additional_filters, context, run_id,
+                    searched_keywords, run_seen, on_progress,
                 )
                 totals["cycles"] += 1
                 totals["keywords_searched"] += len(round_keywords)
@@ -228,7 +232,8 @@ async def run_orchestrator(
             search_array = user_keywords + array if provided_pending else array
             provided_pending = False
             relevant, ads_by_kw, relevant_by_kw = await _search_and_judge(
-                search_array, config, additional_filters, context, run_id, searched_keywords, run_seen,
+                search_array, config, additional_filters, context, run_id,
+                searched_keywords, run_seen, on_progress,
             )
             totals["cycles"] += 1
             totals["keywords_searched"] += len(search_array)
@@ -320,13 +325,24 @@ async def _search_and_judge(
     run_id: str | None = None,
     searched_keywords: list[str] | None = None,
     run_seen: RunSeenIds | None = None,
+    on_progress=None,
 ) -> tuple[int, dict[str, int], dict[str, int]]:
     """
-    One sequential scrape+judge pass over `keywords`, on the SHARED
-    browser context (no relaunch between cycles). `run_id` names the single
-    result file for the whole run; `searched_keywords` is appended to in place
-    so every cycle's keywords end up in the run summary and the file's
-    "keywords" list — including keywords that return zero ads.
+    Scrape and judge `keywords`, judging and saving each keyword as it lands.
+
+    A single pass on the SHARED browser context (no relaunch between cycles).
+    `run_id` names the single result file for the whole run;
+    `searched_keywords` is appended to in place so every cycle's keywords end
+    up in the run summary and the file's "keywords" list — including keywords
+    that return zero ads.
+
+    Judging per keyword rather than per pass is what makes a long run show
+    anything at all. Scraping a keyword with ~570 results takes minutes, so
+    batching every keyword into one judgement left the UI empty for the whole
+    crawl, and any failure after the crawl discarded every ad harvested before
+    it. `on_progress` reports the harvest as it happens so the run can be seen
+    to be alive, and each keyword's verdicts are written to the run file the
+    moment they land.
     Returns (relevant_count, ads_fetched_by_keyword, relevant_by_keyword).
     """
     filters = config.filters.model_copy(update={"keywords": keywords})
@@ -335,6 +351,50 @@ async def _search_and_judge(
 
     if searched_keywords is not None:
         searched_keywords.extend(keywords)
+
+    judged_total = 0
+
+    async def judge_batch(ads: list, keyword: str) -> int:
+        nonlocal judged_total
+        for ad in ads:
+            if ad.source_keyword in ads_by_kw:
+                ads_by_kw[ad.source_keyword] += 1
+        if not ads:
+            return 0
+
+        verdicts = await judge_ad_relevance(
+            ads,
+            batch_size=config.judge_batch_size,
+            max_concurrent=config.judge_max_concurrent,
+            additional_filters=additional_filters or None,
+            # The judge reasons in two stages and needs BOTH: about-you defines
+            # the profile (accept vs reject), the additional request only
+            # decides accept vs defer. Without about-you every off-request ad
+            # would look like trash instead of something worth keeping.
+            profile_text=config.profile.background,
+            request_id=config.request_id,
+        )
+        summary = record_results(
+            ads, verdicts, config.filters.category, config.filters,
+            run_id=run_id, searched_keywords=searched_keywords,
+            profile_id=config.profile_id,
+        )
+        for ad in summary["accepted"]:
+            if ad.source_keyword in relevant_by_kw:
+                relevant_by_kw[ad.source_keyword] += 1
+        judged_total += len(summary["accepted"])
+        return len(summary["accepted"])
+
+    async def harvested(batch, keyword, total_unique):
+        if on_progress:
+            try:
+                result = on_progress(phase="harvested", keyword=keyword,
+                                     harvested=total_unique, batch_size=len(batch))
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:  # noqa: BLE001 - progress must never break a run
+                logger.warning("⚠️ Progress reporting failed (%s) — continuing", exc)
+        return await judge_batch(batch, keyword)
 
     ads = await run_scrape(
         filters,
@@ -348,33 +408,17 @@ async def _search_and_judge(
         # judged again every run.
         request_id=config.request_id,
         parallel_workers=config.parallel_workers,
+        on_harvested=harvested if on_progress is not None else None,
     )
-    if not ads:
-        return 0, ads_by_kw, relevant_by_kw
 
-    for ad in ads:
-        if ad.source_keyword in ads_by_kw:
-            ads_by_kw[ad.source_keyword] += 1
+    # Keywords that produced nothing are still counted as searched, and any ads
+    # the harvest callback did not already judge (no progress callback, or a
+    # reporting hook that failed) are judged here so nothing is silently lost.
+    if ads and not on_progress:
+        await judge_batch(ads, "(unreported)")
+    elif ads:
+        seen_in_callback = ads_by_kw and sum(ads_by_kw.values())
+        if ads and not seen_in_callback:
+            await judge_batch(ads, "(unreported)")
 
-    verdicts = await judge_ad_relevance(
-        ads,
-        batch_size=config.judge_batch_size,
-        max_concurrent=config.judge_max_concurrent,
-        additional_filters=additional_filters or None,
-        # The judge reasons in two stages and needs BOTH: about-you defines the
-        # profile (accept vs reject), the additional request only decides
-        # accept vs defer. Without about-you every off-request ad would look
-        # like trash instead of something worth keeping.
-        profile_text=config.profile.background,
-        request_id=config.request_id,
-        parallel_workers=config.parallel_workers,
-    )
-    summary = record_results(
-        ads, verdicts, config.filters.category, config.filters,
-        run_id=run_id, searched_keywords=searched_keywords,
-        profile_id=config.profile_id,
-    )
-    for ad in summary["accepted"]:
-        if ad.source_keyword in relevant_by_kw:
-            relevant_by_kw[ad.source_keyword] += 1
-    return len(summary["accepted"]), ads_by_kw, relevant_by_kw
+    return judged_total, ads_by_kw, relevant_by_kw
