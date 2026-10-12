@@ -15,9 +15,14 @@ from datetime import datetime, timezone
 
 from core import ADS_DIR, AdRelevanceVerdict, AdRecord, PROFILE_HASH_TTL
 
-from modules.families.index import get_family_index
 from modules.families import deferred as deferred_store
 from modules.families import store as family_store
+from modules.verdicts import (
+    FilterIndex as get_filter_index,
+    record_accepted,
+    record_junk,
+    record_rejected,
+)
 from core import ScrapingFilters
 
 logger = logging.getLogger(__name__)
@@ -43,7 +48,7 @@ def record_results(
     filters: ScrapingFilters | None = None,
     run_id: str | None = None,
     searched_keywords: list[str] | None = None,
-    family_id: str | None = None,
+    profile_id: str | None = None,
     request_family_id: str | None = None,
 ) -> dict:
     """
@@ -81,32 +86,43 @@ def record_results(
         else:
             judged_rejects.append(entry)
 
-    # Final verdicts only — AI-failures stay unmarked (free retry later).
+    # Final verdicts only — AI-failures stay unmarked, so they are retried.
     #
-    # Recorded against the FAMILY, not against a hash of the profile text. That
-    # hash was the original duplicate bug: one edited word rotated the entire
-    # key space and every previously judged ad looked unseen again. A family
-    # records LINEAGE, so a new node inherits its ancestors' verdicts instead.
+    # Each outcome goes to the set whose reach matches how certain the answer
+    # is. "no_hiring" is a statement about the ad itself and is remembered
+    # globally; "not_for_me" is only true against one profile. Putting a
+    # not_for_me rejection in the global junk set would discard a lead another
+    # profile would have valued, so the two are kept strictly apart.
     newly_marked = 0
-    family_index = get_family_index(category_id, family_id) if family_id else None
-    if family_index is None:
-        logger.warning("⚠️ No family for these results — verdicts not recorded (dedup stays within-run only)")
+    filter_index = get_filter_index(category_id, profile_id, request_family_id)
+    accepted_ids, junk_ids, rejected_ids = [], [], []
+
     for ad in ads:
         v = verdicts[ad.ad_archive_id]
-        if v.ai_failed or family_index is None:
+        if v.ai_failed:
             continue
-        if not family_index.has(ad.ad_archive_id):
+        ad_id = ad.ad_archive_id
+        if not filter_index.check(ad_id)[0]:
             newly_marked += 1
-        family_index.record(
-            ad.ad_archive_id,
-            v.outcome,
-            reason=v.reason,
-            ad_category=v.ad_category or ad.category or "",
-            request_family_id=v.request_family_id or request_family_id,
-        )
-        # Accepted leaves the not-now bucket for good.
+
         if v.outcome == "accepted":
-            deferred_store.resolve(family_id, ad.ad_archive_id)
+            accepted_ids.append(ad_id)
+            # A lead never sits in the not-now bucket.
+            deferred_store.resolve(profile_id, ad_id)
+        elif v.outcome == "deferred":
+            pass  # written to the bucket below
+        elif v.rejection_kind == "no_hiring":
+            junk_ids.append(ad_id)
+        else:
+            rejected_ids.append(ad_id)
+
+    if accepted_ids:
+        record_accepted(category_id, accepted_ids)
+    if junk_ids:
+        record_junk(category_id, junk_ids)
+    if rejected_ids and profile_id:
+        record_rejected(profile_id, rejected_ids)
+    filter_index.refresh()
 
     cat_dir = ADS_DIR / category_id
     cat_dir.mkdir(parents=True, exist_ok=True)
@@ -115,24 +131,24 @@ def record_results(
     # mirrored to JSON so a row can never be lost to a Redis flush. This
     # replaces the old append-only store, which had grown to 47 rows for 26
     # unique ads because nothing ever checked.
-    if family_id and accepted:
+    if profile_id and accepted:
         added = family_store.add_leads(
-            family_id, [ad.model_dump(mode="json") for ad in accepted]
+            profile_id, [ad.model_dump(mode="json") for ad in accepted]
         )
         if added:
-            logger.info("📥 Lead list for %s: %d new lead(s)", family_id, added)
+            logger.info("📥 Lead list for %s: %d new lead(s)", profile_id, added)
 
     # Deferred ads keep their FULL record so a later request family can
     # re-judge them without re-scraping.
-    if family_id:
+    if profile_id:
         for entry in deferred:
             deferred_store.defer_ad(
-                family_id, entry, request_family_id or "",
+                profile_id, entry, request_family_id or "",
                 reason=entry.get("relevance_reason", ""),
                 ad_category=entry.get("ad_category", ""),
             )
         if deferred:
-            logger.info("⏸️  %d ad(s) deferred for %s", len(deferred), family_id)
+            logger.info("⏸️  %d ad(s) deferred for %s", len(deferred), profile_id)
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     run_path = cat_dir / (f"{run_id}.json" if run_id else f"run_{stamp}.json")

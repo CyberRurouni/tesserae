@@ -21,10 +21,11 @@ from core import (
     PROFILE_HASH_TTL,
 )
 
-from modules.families.index import get_family_index
 
 from .browser import browser_session
 from .extract import extract_ads_from_page
+from modules.verdicts import FilterIndex as get_filter_index
+
 from .seen import RunSeenIds
 from .search import (
     apply_filters,
@@ -38,7 +39,7 @@ from .search import (
 logger = logging.getLogger(__name__)
 
 
-def renew_deferral(family_id: str | None, ad_id: str) -> bool:
+def renew_deferral(profile_id: str | None, ad_id: str) -> bool:
     """
     Extend a deferred ad's TTL when we pass over it.
 
@@ -48,11 +49,11 @@ def renew_deferral(family_id: str | None, ad_id: str) -> bool:
     Imported lazily so the scraper city does not depend on the family package
     at import time.
     """
-    if not family_id:
+    if not profile_id:
         return False
     from modules.families.deferred import renew
 
-    return renew(family_id, ad_id)
+    return renew(profile_id, ad_id)
 
 # Verdict key pattern in Redis DB 1 — first writer wins, and the key is
 # CATEGORY+PROFILE-SCOPED: a verdict is about an ad UNDER A LENS + PROFILE,
@@ -173,7 +174,7 @@ async def run_scrape(
     headless: bool = False,
     context: BrowserContext | None = None,
     run_seen_ids: RunSeenIds | None = None,
-    family_id: str | None = None,
+    profile_id: str | None = None,
     request_family_id: str | None = None,
     parallel_workers: int = 1,
 ) -> list[AdRecord]:
@@ -192,9 +193,8 @@ async def run_scrape(
     run_seen_ids: optional run-scoped shared set. The orchestrator passes one so
     the ids this pass harvests are visible to sibling workers; omit it (smoke
     runner, tests) and dedup stays in-process.
-    family_id: the family whose verdicts decide what to skip. Without it the
-    only dedup available is within this pass — callers should resolve the
-    active family rather than skip this.
+    profile_id: whose profile this run is under. Decides which rejections
+    apply — accepted and junk are global, rejections are only this profile's.
     parallel_workers: how many keywords to crawl at once. 1 is the original
     single-page sequential behaviour; above 1 each worker gets its own page and
     a slice of the keywords.
@@ -214,17 +214,17 @@ async def run_scrape(
     # In-memory mirror of this family's verdicts (plus its ancestors'), loaded
     # once instead of one Redis round trip per scraped card. With no family the
     # mirror is empty, which degrades to within-pass dedup only.
-    verdict_index = get_family_index(cat_id, family_id) if family_id else None
-    if verdict_index is None:
-        logger.warning("⚠️ No family for this run — only within-pass dedup is active")
+    filter_index = get_filter_index(cat_id, profile_id, request_family_id).load()
+    if profile_id is None:
+        logger.warning("⚠️ No profile for this run — only global dedup is active")
 
     if context is not None:
         return await _scrape_on(context, filters, category, cat_id, run_seen,
-                                 verdict_index, family_id, request_family_id,
+                                 filter_index, profile_id, request_family_id,
                                  parallel_workers)
     async with browser_session(headless=headless) as owned:
         return await _scrape_on(owned, filters, category, cat_id, run_seen,
-                                verdict_index, family_id, request_family_id,
+                                filter_index, profile_id, request_family_id,
                                 parallel_workers)
 
 
@@ -235,8 +235,8 @@ async def _scrape_keyword(
     category,
     cat_id: str,
     run_seen: RunSeenIds,
-    verdict_index,
-    family_id: str | None,
+    filter_index,
+    profile_id: str | None,
     request_family_id: str | None,
     seen_ids: set[str],
     extract_lock: asyncio.Lock,
@@ -305,7 +305,7 @@ async def _scrape_keyword(
         # every ad we just harvested would count as known and trip the early
         # exit on the fourth scroll of every keyword.
         already_known = bool(step_ids) and all(
-            (verdict_index is not None and verdict_index.has(ad_id))
+            (filter_index is not None and filter_index.check(ad_id)[0])
             or run_seen.has(ad_id)
             for ad_id in step_ids
         )
@@ -359,19 +359,18 @@ async def _scrape_keyword(
     fresh: list[AdRecord] = []
     already_final = deferred_renewed = heuristic_passed = 0
     for ad in keyword_ads:
-        # In-memory check — the mirror already holds everything judged for this
-        # family, everything recorded earlier in this run, and every ancestor's
-        # verdicts. `skip` is request-aware: a deferred ad comes back for
-        # judgement when the request family changes, and is only passed over
-        # when it has not.
-        if verdict_index is not None:
-            skip, why = verdict_index.skip(ad.ad_archive_id, request_family_id)
+        # One decision per card, answered from memory: already-accepted lead,
+        # then universal junk, then this profile's own rejections, then what
+        # this request parked. Only the last can come back — a different
+        # request gets to judge a deferred ad again.
+        if filter_index is not None:
+            skip, why = filter_index.check(ad.ad_archive_id)
             if skip:
                 already_final += 1
                 if why == "deferred":
                     # Passing over a deferred ad renews it — the whole cost of
                     # not re-judging it under an unchanged request.
-                    if renew_deferral(family_id, ad.ad_archive_id):
+                    if renew_deferral(profile_id, ad.ad_archive_id):
                         deferred_renewed += 1
                 continue
         if run_seen.shared and ad.ad_archive_id in sibling_claimed:
@@ -409,8 +408,8 @@ async def _scrape_on(
     category,
     cat_id: str,
     run_seen: RunSeenIds,
-    verdict_index=None,
-    family_id: str | None = None,
+    filter_index=None,
+    profile_id: str | None = None,
     request_family_id: str | None = None,
     parallel_workers: int = 1,
 ) -> list[AdRecord]:
@@ -442,8 +441,8 @@ async def _scrape_on(
             fresh: list[AdRecord] = []
             for idx, keyword in enumerate(keywords):
                 fresh.extend(await _scrape_keyword(
-                    page, keyword, filters, category, cat_id, run_seen, verdict_index,
-                    family_id, request_family_id, seen_ids, extract_lock,
+                    page, keyword, filters, category, cat_id, run_seen, filter_index,
+                    profile_id, request_family_id, seen_ids, extract_lock,
                     is_first_keyword=(idx == 0),
                 ))
         finally:
@@ -467,7 +466,7 @@ async def _scrape_on(
                 try:
                     out.extend(await _scrape_keyword(
                         pages[idx], keyword, filters, category, cat_id, run_seen,
-                        verdict_index, family_id, request_family_id, seen_ids,
+                        filter_index, profile_id, request_family_id, seen_ids,
                         extract_lock, is_first_keyword=(idx == 0 and j == 0),
                         worker_label=label,
                     ))

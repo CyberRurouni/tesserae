@@ -8,29 +8,6 @@ import { cn } from '@/lib/utils';
 
 const CLASSIFY_DEBOUNCE_MS = 1200;
 
-function ScopeChips({ domain, specs }) {
-  if (!domain || !specs?.length) {
-    return (
-      <span className="text-xs text-muted-foreground/70">
-        Not placed in a category yet — this profile can&apos;t be matched to related ones.
-      </span>
-    );
-  }
-  return (
-    <span className="flex flex-wrap items-center gap-1.5">
-      <span className="text-xs text-muted-foreground">{domain}</span>
-      {specs.map((spec) => (
-        <span
-          key={spec}
-          className="rounded-full border border-primary/30 bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-foreground"
-        >
-          {spec}
-        </span>
-      ))}
-    </span>
-  );
-}
-
 /**
  * The live classification banner.
  *
@@ -82,12 +59,10 @@ function ChangeBanner({ verdict, busy }) {
           Nothing is re-judged. Everything already decided still holds under a narrower scope.
         </p>
       )}
-      {verdict.related_families?.length > 0 && (
-        <p className="mt-1.5 text-xs text-muted-foreground">
-          It will also inherit verdicts from {verdict.related_families.length} related profile
-          {verdict.related_families.length === 1 ? '' : 's'}.
-        </p>
-      )}
+      <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+        The new profile starts with a clean slate: leads you already accepted and ads that offer no
+        employment at all carry over, but everything else gets judged again on its own terms.
+      </p>
     </div>
   );
 }
@@ -177,8 +152,6 @@ const save = async (accept = true) => {
           family_id: selectedId,
           accept,
           about: verdict?.about,
-          category_domain: verdict?.category_domain,
-          specialisations: verdict?.specialisations ?? [],
         }),
       });
       const body = await res.json();
@@ -197,13 +170,11 @@ const save = async (accept = true) => {
       if (wasNewProfile) {
         text = `Profile created: ${body.family?.about ?? 'untitled'}.`;
       } else if (body.status === 'created') {
-        text = `New profile created: ${body.family?.about ?? 'untitled'}. ${
-          body.seed_plan?.notes?.[0] ?? ''
-        }`;
+        text = `New profile created: ${body.family?.about ?? 'untitled'}.`;
       } else {
         text = 'Profile updated.';
       }
-      setMessage({ tone: 'success', text, plan: body.seed_plan ?? null });
+      setMessage({ tone: 'success', text });
       await load();
       setSelectedId(body.family?.family_id ?? selectedId);
     } catch (error) {
@@ -291,7 +262,8 @@ const save = async (accept = true) => {
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">
                     {family.counts.leads} lead{family.counts.leads === 1 ? '' : 's'} ·{' '}
-                    {family.counts.deferred_stored} held · {family.counts.rejected} rejected
+                    {family.counts.deferred_stored} held ·{' '}
+                    {family.counts.rejected ?? 0} rejected here
                   </p>
                 </button>
               );
@@ -305,7 +277,6 @@ const save = async (accept = true) => {
               <CardTitle className="text-lg">
                 {selected ? selected.about || 'Untitled profile' : 'New profile'}
               </CardTitle>
-              {selected && <ScopeChips domain={selected.category_domain} specs={selected.specialisations} />}
             </CardHeader>
             <CardContent className="space-y-4">
               <textarea

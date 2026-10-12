@@ -39,11 +39,10 @@ class RunConfig(BaseModel):
     filters: ScrapingFilters
     time_window: TimeWindow | None = None
 
-    # Which family this run belongs to. Verdicts are recorded against the
-    # family (and inherited from its ancestors), NOT against a hash of the
-    # profile text — a hash silently rotated the whole key space on any edit.
-    # None means "resolve the active family at start".
-    family_id: str | None = None
+    # Whose profile this run is under. Only per-profile rejections depend on
+    # it; accepted leads and universal junk are global.
+    # None means "resolve the active profile at start".
+    profile_id: str | None = None
     # Which request family governs accept-vs-defer for this run.
     request_family_id: str | None = None
 

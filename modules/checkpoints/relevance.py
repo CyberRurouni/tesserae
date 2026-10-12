@@ -47,48 +47,59 @@ You are a strict ad-relevance judge in a lead-generation pipeline.
 You receive THREE separate inputs and a numbered list of ads. They play \
 different roles and you must not confuse them:
 
-  ABOUT YOU          who the person IS. Defines the FAMILY. An ad outside this \
-                     is not theirs at all.
-  ADDITIONAL REQUEST what they want RIGHT NOW. Temporary scoping inside the \
-                     family — it never changes who they are.
+  ABOUT YOU          who the person IS. Defines what fields are theirs at all.
+  ADDITIONAL REQUEST what they want RIGHT NOW. Temporary scoping — it never \
+                     changes who they are.
   CATEGORY           the kind of opportunity being searched for.
 
-Decide in TWO stages, in this order, for every ad.
+Decide in THREE stages, in this order, for every ad. Stop at the first stage \
+that answers.
 
-STAGE 1 - is this ad inside the family (about the person)?
-  NO  -> outcome "rejected". It is not their field.
+STAGE 1 — does this ad offer actual employment to anyone?
+  NO  -> outcome "rejected", rejection_kind "no_hiring".
+          Nobody is being employed: a course, bootcamp, certification, webinar, \
+          B2B / recruiting / outsourcing / staffing service, job board, \
+          marketplace, agency product, or content such as a podcast, talk or \
+          newsletter. A company advertising that it recruits for OTHER companies \
+          is a service provider, not an employer.
   YES -> go to stage 2.
 
-STAGE 2 - is it wanted under the request?
-  YES -> "accepted"
-  NO  -> "deferred". It fits them but they did not ask for it this time.
-          NOT trash. Keep it; they may want it under a different request.
+STAGE 2 — is the role inside what this person actually does?
+  NO  -> outcome "rejected", rejection_kind "not_for_me".
+          An employer IS hiring, but not for them: a different field, a \
+          different stack, unrelated seniority. This is specific to THIS \
+          person — another profile might well want it, so it is never treated \
+          as universally useless.
+  YES -> go to stage 3.
 
-The distinction between "rejected" and "deferred" is the whole point:
-  - conflicts with ABOUT YOU            -> rejected
-  - fits ABOUT YOU, off-target for the REQUEST -> deferred
+STAGE 3 — is it wanted under the current request?
+  YES -> outcome "accepted"
+  NO  -> outcome "deferred". Right field, wrong moment. NOT trash: they may \
+          want it under a different request.
+
+The distinction between the two rejection kinds is the most important part of \
+your answer. "no_hiring" is a permanent, global judgement about the ad itself. \
+"not_for_me" is only true against this one profile. Getting them backwards \
+either hides a good lead forever, or re-judges junk for every profile.
 
 Judging rules:
 - Judge the ad's CONTENT, never the mere presence of keywords. An ad \
-containing the word "hiring" is not enough — it must actually offer the \
-thing itself.
-- Educational providers count ONLY when the specific ad announces real \
-hiring (placement drives, recruitment by the provider) — never when it sells \
-a course, bootcamp, certificate or webinar.
-- Ads promoting software, agencies, services, events or content channels are \
-not opportunities.
+containing the word "hiring" is not enough — it must actually offer a role.
 - Seniority, contract vs permanent, and remote-vs-onsite are REQUEST \
-questions, never family questions: they can defer an ad, never reject it.
-- When genuinely unsure about stage 1, answer "rejected".
+questions, never profile questions: they can defer an ad, never reject it.
+- Company location and employer nationality are REQUEST questions unless the \
+ad offers no employment at all.
+- When genuinely unsure at stage 1, answer "no_hiring".
+- When genuinely unsure at stage 2, answer "not_for_me".
 
 Also give each ad a short "category" naming the work it is about (e.g. \
-"Backend development", "Data science"), so it can be matched against a family \
-later without another model call.
+"Backend development", "Data science").
 
 Answer with JSON only, exactly this shape, one entry per input id and no \
 extra ids:
 {"verdicts": [{"id": "<ad id>", "outcome": "accepted|deferred|rejected", \
-"category": "<max 3 words>", "confidence": <0.0-1.0>, "reason": "<max 12 words>"}]}
+"rejection_kind": "no_hiring|not_for_me", "category": "<max 3 words>", \
+"confidence": <0.0-1.0>, "reason": "<max 12 words>"}]}
 """
 
 
@@ -107,6 +118,18 @@ def _format_ad(ad: AdRecord, index: int) -> str:
     # Full ad text — the whole creative goes to the judge, no clipping.
     cta = f" | CTA: {ad.cta_text}" if ad.cta_text else ""
     return f"[{index}] id={ad.ad_archive_id} | advertiser={ad.advertiser_name or 'unknown'}{cta}\n{ad.ad_text}"
+
+
+def _parse_rejection_kind(row: dict) -> str:
+    """
+    Read the rejection kind, defaulting to the SAFE end.
+
+    Anything unrecognised becomes "not_for_me". That only costs a re-judgement
+    under another profile; calling something junk it isn't would discard it for
+    good, which is the one irreversible decision in this system.
+    """
+    value = str(row.get("rejection_kind") or row.get("rejectionKind") or "").strip().lower()
+    return "no_hiring" if value == "no_hiring" else "not_for_me"
 
 
 def _parse_outcome(row: dict) -> str:
@@ -196,9 +219,14 @@ async def _judge_batch(
         if ad_id not in known or ad_id in verdicts:
             continue  # hallucinated or duplicate id — ignore
         row["_has_request"] = has_request
+        outcome = _parse_outcome(row)
         verdicts[ad_id] = AdRelevanceVerdict(
             ad_archive_id=ad_id,
-            outcome=_parse_outcome(row),
+            outcome=outcome,
+            # Only a rejection carries a kind; the schema default covers the rest.
+            rejection_kind=(
+                _parse_rejection_kind(row) if outcome == "rejected" else "not_for_me"
+            ),
             confidence=_normalize_confidence(row.get("confidence")),
             reason=str(row.get("reason", "")).strip(),
             ad_category=str(row.get("category", "")).strip(),
@@ -218,9 +246,11 @@ async def _judge_batch(
 
     tally = {o: sum(1 for v in verdicts.values() if v.outcome == o)
              for o in ("accepted", "deferred", "rejected")}
+    junk = sum(1 for v in verdicts.values() if v.rejection_kind == "no_hiring")
     logger.info(
-        "⚖️ Relevance batch %d: %d accepted / %d deferred / %d rejected",
-        batch_no, tally["accepted"], tally["deferred"], tally["rejected"],
+        "⚖️ Relevance batch %d: %d accepted / %d deferred / %d rejected "
+        "(%d offer no employment at all)",
+        batch_no, tally["accepted"], tally["deferred"], tally["rejected"], junk,
     )
     return verdicts
 
@@ -298,9 +328,12 @@ async def judge_ad_relevance(
     shaky = sum(1 for v in verdicts.values()
                 if v.outcome == "accepted" and v.confidence < 0.6)
     failed = sum(1 for v in verdicts.values() if v.ai_failed)
+    junk = sum(1 for v in verdicts.values()
+               if v.outcome == "rejected" and v.rejection_kind == "no_hiring")
     logger.info(
-        "✅ Checkpoint (a): %d accepted / %d deferred / %d rejected of %d%s%s",
-        tally["accepted"], tally["deferred"], tally["rejected"], len(verdicts),
+        "✅ Checkpoint (a): %d accepted / %d deferred / %d rejected of %d "
+        "(%d no-employer)\u0020%s%s",
+        tally["accepted"], tally["deferred"], tally["rejected"], len(verdicts), junk,
         f" — {shaky} accepted below 0.6 confidence" if shaky else "",
         f" — {failed} lost to AI failure (will retry next run)" if failed else "",
     )

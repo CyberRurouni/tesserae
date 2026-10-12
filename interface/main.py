@@ -70,7 +70,7 @@ class RunRequest(BaseModel):
     heuristic_patterns: Optional[dict[str, list[str]]] = None
     # Which family to run under. Omitted => the active family, which is what
     # the current one-page config UI implies.
-    family_id: Optional[str] = None
+    profile_id: Optional[str] = None
     request_family_id: Optional[str] = None
     # Keywords crawled at once. 1 keeps the original sequential behaviour;
     # raise it for speed at the cost of captcha exposure.
@@ -192,25 +192,6 @@ app.include_router(families_router)
 
 # ── Run lifecycle ──────────────────────────────────────────────────────────
 
-_MIGRATED: set[str] = set()
-
-
-def _migrate_once(family_id: str, category: str) -> bool:
-    """
-    Move legacy hash-namespaced verdicts into the family, once per process.
-
-    Without this the user loses every verdict they have accumulated and the
-    next run re-collects ads they have already seen — the exact symptom the
-    family model exists to remove.
-    """
-    if family_id in _MIGRATED:
-        return False
-    _MIGRATED.add(family_id)
-    from modules.families.active import migrate_legacy_verdicts
-
-    counts = migrate_legacy_verdicts(category, family_id)
-    return bool(counts["accepted"] or counts["rejected"])
-
 async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
     """Execute the orchestrator, updating the polled run state as it goes."""
     state = run_states.setdefault(run_id, {"id": run_id})
@@ -227,20 +208,20 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
         state["total_keywords"] = total
         state["progress"] = 5
 
-        # Resolve the family BEFORE the orchestrator so the run state reports
-        # which lens it ran under, and so the one-time migration off the old
-        # profile-hash verdict namespace happens against a real family.
-        from modules.families.active import ensure_active_family, migrate_legacy_verdicts
+        # Resolve the profile before the orchestrator so the run state reports
+        # which lens it ran under. Accepted leads and universal junk are global
+        # and need no profile; only this profile's own rejections do.
+        from modules.families.active import ensure_active_family
 
-        family = await ensure_active_family()
-        state["family_id"] = family.family_id
-        state["family_about"] = family.about
-        if not request.family_id and _migrate_once(family.family_id, filters.category):
-            pass
+        profile = await ensure_active_family()
+        if not request.profile_id:
+            request = request.model_copy(update={"profile_id": profile.family_id})
+        state["profile_id"] = profile.family_id
+        state["profile_about"] = profile.about
 
         logger.info(
-            "Run %s starting with %d keyword(s), mode=%s, family=%s",
-            run_id, len(filters.keywords), request.run_mode, family.family_id,
+            "Run %s starting with %d keyword(s), mode=%s, profile=%s",
+            run_id, len(filters.keywords), request.run_mode, profile.family_id,
         )
 
         summary = await _run_with_filters(
@@ -248,7 +229,7 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
             None if request.run_until_complete else (request.cycles or 1),
             request.run_mode,
             run_id,
-            request.family_id,
+            request.profile_id,
             request.request_family_id,
             max(1, min(int(request.parallel_workers or 1), 3)),
         )

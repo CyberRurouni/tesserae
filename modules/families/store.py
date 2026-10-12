@@ -93,22 +93,6 @@ def find_family_by_about(about: str) -> Family | None:
     return None
 
 
-def related_families(domain: str, specialisations: list[str]) -> list[Family]:
-    """
-    Families whose verdicts can seed a new node with this coverage.
-
-    Shares at least one specialisation. Sharing a domain is far too loose —
-    all of them are "Programming", and a frontend verdict says nothing about a
-    data-science ad.
-    """
-    from .taxonomy import shares_scope
-
-    return [
-        f
-        for f in list_families()
-        if shares_scope(domain, specialisations, f.category_domain, f.specialisations)
-    ]
-
 
 def save_family(family: Family) -> Family:
     family.updated_at = _now()
@@ -126,22 +110,13 @@ def save_family(family: Family) -> Family:
     return family
 
 
-def create_family(
-    about: str,
-    category_domain: str,
-    specialisations: list[str],
-    profile_text: str,
-    seeded_from: list[str] | None = None,
-) -> Family:
+def create_family(about: str, profile_text: str) -> Family:
     return save_family(
         Family(
             family_id=new_family_id(about),
             about=about,
-            category_domain=category_domain,
-            specialisations=list(specialisations),
             profile_text=profile_text,
             founding_text=profile_text,
-            seeded_from=list(seeded_from or []),
         )
     )
 
@@ -170,18 +145,13 @@ def save_request_family(request_family: RequestFamily) -> RequestFamily:
     return request_family
 
 
-def create_request_family(
-    family_id: str,
-    request_text: str,
-    seeded_from: list[str] | None = None,
-) -> RequestFamily:
+def create_request_family(family_id: str, request_text: str) -> RequestFamily:
     return save_request_family(
         RequestFamily(
             request_family_id=new_request_family_id(family_id),
             family_id=family_id,
             request_text=request_text,
             founding_text=request_text,
-            seeded_from=list(seeded_from or []),
         )
     )
 
@@ -248,24 +218,3 @@ def lead_ids(family_id: str) -> set[str]:
     return {a["ad_archive_id"] for a in load_leads(family_id) if a.get("ad_archive_id")}
 
 
-# ── lineage ──────────────────────────────────────────────────────────────────
-def ancestry(family_id: str, _seen: set[str] | None = None) -> list[str]:
-    """
-    This family's ancestors, nearest first, cycle-safe.
-
-    Lineage is what makes seeding free: a new node names the families it
-    descends from instead of copying thousands of verdict rows. Widening walks
-    the ancestors and RE-JUDGES what they rejected; narrowing just inherits.
-    """
-    _seen = _seen or set()
-    if family_id in _seen:
-        return []
-    _seen.add(family_id)
-    fam = get_family(family_id)
-    if not fam:
-        return []
-    out: list[str] = []
-    for parent in fam.seeded_from:
-        out.append(parent)
-        out.extend(ancestry(parent, _seen))
-    return out

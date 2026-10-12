@@ -13,10 +13,27 @@ from pydantic import BaseModel, Field
 #   rejected — outside the family's acceptable set. Final.
 AdOutcome = Literal["accepted", "deferred", "rejected"]
 
+# WHY an ad was rejected. The split matters because the two kinds have
+# completely different reach:
+#
+#   no_hiring  — nobody is being employed. A course, a bootcamp, a B2B
+#                recruiting service, a job board, a podcast. True regardless of
+#                who is searching, so it is remembered globally and that ad is
+#                never scraped or judged again by anyone.
+#   not_for_me — a real employer IS hiring, just not for this person. Only
+#                meaningful against one profile, so it is remembered there and
+#                another profile gets to judge the ad for itself.
+RejectionKind = Literal["no_hiring", "not_for_me"]
+
 
 class AdRelevanceVerdict(BaseModel):
     ad_archive_id: str
     outcome: AdOutcome
+    # Only meaningful when outcome == "rejected". Defaults to the SAFE end:
+    # an unclassified rejection is treated as profile-specific, because that
+    # only costs a re-judgement, whereas wrongly calling something junk
+    # discards it for good.
+    rejection_kind: RejectionKind = "not_for_me"
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
     reason: str = ""
     # What the ad is about, as a short label. Recorded on rejections and

@@ -25,10 +25,8 @@ from core import (
     Family,
     FamilyClassification,
     RequestClassification,
-    ScopeCheck,
 )
 
-from . import taxonomy
 
 logger = logging.getLogger(__name__)
 
@@ -36,31 +34,6 @@ logger = logging.getLogger(__name__)
 def _json_hint(shape: str) -> str:
     return f"Answer with JSON only, shaped exactly like: {shape}"
 
-
-def _chains_for_prompt() -> str:
-    """Grouped by domain so the model copies a bare specialisation name."""
-    return "\n".join(
-        f"  {domain}:\n" + "\n".join(f'    - "{spec}"' for spec in specs)
-        for domain, specs in taxonomy.SPECIALISATIONS.items()
-    )
-
-
-def _parse_specialisations(raw_value) -> list[str]:
-    """
-    Accept bare names, and tolerate the model echoing a whole chain.
-
-    Observed in practice: asked for specialisations it returned
-    ["Programming -> Backend development"]. Taking the last segment recovers the
-    right value instead of discarding an otherwise good classification.
-    """
-    out: list[str] = []
-    for item in raw_value or []:
-        value = str(item).strip()
-        if "->" in value:
-            value = value.split("->")[-1].strip()
-        if value and value not in out:
-            out.append(value)
-    return out
 
 
 # ============================================================================
@@ -96,29 +69,14 @@ ALREADY open to is NOT a widening:
     family rejected Node.js ads; naming Node.js admits ads whose fate was already
     sealed. That is the destructive direction, and it needs a new node.
 
-Also assign:
-  - "about"     — what this family is ABOUT, in a few words ("Python",
-                  "Backend development"). Distinct families have distinct
-                  about values.
-  - "category_domain"  — one domain from the CLOSED list below.
-  - "specialisations"  — one OR MORE specialisations inside that domain. List
-                  EVERY area this family genuinely covers, not just the main
-                  one. A JavaScript developer covering frontend AND backend
-                  must list both — listing only one would hide the family from a
-                  "Backend development" family that should have found it.
-                  Copy the specialisation name EXACTLY as written below, e.g.
-                  "Backend development". Do NOT include the domain and do NOT
-                  write it as a chain like "Programming -> Backend development".
-
-Valid domains and their specialisations (copy the specialisation name only):
-{_chains_for_prompt()}
+Also assign "about": what this family is ABOUT, in a few words ("Python
+backend developer"). Distinct families have distinct about values.
 
 new_family_required is true for "narrowing" and "widening", false for "none".
 
 {_json_hint('{"change": "none|narrowing|widening", "new_family_required": true|false, '
-            '"about": "<max 4 words>", "category_domain": "<domain>", '
-            '"specialisations": ["<specialisation>", "..."], '
-            '"explanation": "<max 40 words, plain English, shown to the user when a new node is proposed>"}')}
+            '"about": "<max 4 words>", '
+            '"explanation": "<max 40 words, plain English, shown to the user when a new profile is proposed>"}')}
 """
 
 
@@ -139,14 +97,10 @@ async def classify_profile_change(current_text: str, edited_text: str) -> Family
         temperature=0.0,  # a classification, not a creative act
     )
 
-    domain = str(raw.get("category_domain") or "").strip()
-    specs = _parse_specialisations(raw.get("specialisations"))
     result = FamilyClassification(
         change=raw.get("change") or "none",
         new_family_required=bool(raw.get("new_family_required")),
         about=str(raw.get("about") or "").strip(),
-        category_domain=domain,
-        specialisations=specs,
         explanation=str(raw.get("explanation") or "").strip(),
     )
 
@@ -229,52 +183,3 @@ async def classify_request_change(current_text: str, edited_text: str) -> Reques
     return result
 
 
-# ============================================================================
-# 🔹 SCOPE CHECK — zero creativity, bare membership
-# ============================================================================
-_SCOPE_SYSTEM = f"""\
-You answer ONE yes/no question with no interpretation and no creativity.
-
-QUESTION: does the described work fall INSIDE the given scope?
-
-Valid scopes (each is a domain and a specialisation):
-{_chains_for_prompt()}
-
-Rules:
-  - "in_scope" is true when the work a normal recruiter would file under that
-    specialisation. Judge the work itself, not the ad's wording or seniority.
-  - An ad mentioning a technology that sits OUTSIDE the specialisation is out of
-    scope. A "Backend development" scope does not admit data-science work, and a
-    "Data science" scope does not admit backend work.
-  - Seniority, contract vs permanent, and remote-vs-onsite do NOT change scope.
-  - Do not reason about whether the user would want it. Scope only.
-
-{_json_hint('{"in_scope": true|false, "matched_specialisation": "<specialisation or empty>", '
-            '"reason": "<max 15 words>"}')}
-"""
-
-
-async def check_scope(ad_description: str, family: Family) -> ScopeCheck:
-    client = AIClient()
-    scope = (
-        f"{family.category_domain} -> {', '.join(family.specialisations)}"
-        if family.category_domain and family.specialisations
-        else "(unclassified)"
-    )
-    raw = await client.blocking(
-        [
-            {"role": "system", "content": _SCOPE_SYSTEM},
-            {
-                "role": "user",
-                "content": f"SCOPE: {scope}\n\nWORK: {ad_description or '(no text)'}",
-            },
-        ],
-        max_tokens=300,
-        temperature=0.0,
-    )
-    result = ScopeCheck(
-        in_scope=bool(raw.get("in_scope")),
-        matched_specialisation=str(raw.get("matched_specialisation") or "").strip(),
-        reason=str(raw.get("reason") or "").strip(),
-    )
-    return result

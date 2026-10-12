@@ -33,7 +33,6 @@ from .family import (
     FamilyClassification,
     RequestClassification,
     RequestFamily,
-    ScopeCheck,
 )
 
 __all__ = [
@@ -70,5 +69,4 @@ __all__ = [
     "FamilyClassification",
     "RequestClassification",
     "RequestFamily",
-    "ScopeCheck",
 ]

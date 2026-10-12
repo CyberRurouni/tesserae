@@ -36,13 +36,8 @@ class FamilyClassification(BaseModel):
     change: ChangeKind
     new_family_required: bool
     # The family's identity, in the user's own words ("Python", "Backend
-    # development"). Distinct families have distinct about values.
+    # developer"). Distinct families have distinct about values.
     about: str = ""
-    # Coverage inside the fixed taxonomy: one domain, one OR MORE
-    # specialisations. A JavaScript family legitimately covers Frontend AND
-    # Backend at once, so a single leaf would hide it from a Backend family.
-    category_domain: str = ""
-    specialisations: list[str] = Field(default_factory=list)
     # Shown to the user when a new node is proposed. They decline => no save.
     explanation: str = ""
 
@@ -98,7 +93,5 @@ class RequestFamily(BaseModel):
     family_id: str
     request_text: str
     founding_text: str
-    seeded_from: list[str] = Field(default_factory=list)
-    generation: int = 0
     created_at: str = ""
     updated_at: str = ""

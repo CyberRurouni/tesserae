@@ -70,7 +70,7 @@ async def _run_with_filters(
     cycles: int | None,
     run_mode: str,
     run_id: str | None = None,
-    family_id: str | None = None,
+    profile_id: str | None = None,
     request_family_id: str | None = None,
     parallel_workers: int = 1,
 ) -> dict:
@@ -87,7 +87,7 @@ async def _run_with_filters(
         RunConfig(
             profile=profile,
             filters=filters,
-            family_id=family_id,
+            profile_id=profile_id,
             request_family_id=request_family_id,
             parallel_workers=parallel_workers,
         ),
@@ -95,7 +95,7 @@ async def _run_with_filters(
         max_cycles=cycles,
         run_mode=run_mode,
         run_id=run_id,
-        family_id=family_id,
+        profile_id=profile_id,
         request_family_id=request_family_id,
     )
     return summary
