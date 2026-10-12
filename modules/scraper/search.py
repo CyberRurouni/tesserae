@@ -32,10 +32,26 @@ from playwright.async_api import Locator, Page
 from core import ScrapingFilters, Platform, MediaType
 
 from .browser import ADS_LIBRARY_URL
+from .extract import LIBRARY_ID_SPAN_PATTERN
 
 logger = logging.getLogger(__name__)
 
 DEBUG_DIR = Path(__file__).resolve().parents[2] / "debug"
+
+# ── crawl pacing ────────────────────────────────────────────────────────────
+# SCROLL_FLOOR_MS is the floor for one step: long enough to avoid hot-spinning
+# the card count, short enough that a pre-rendered batch costs nothing.
+SCROLL_FLOOR_MS = 120
+# How often to ask "did the cards arrive yet?". ~4ms per call, so polling at
+# 100ms is a ~4% duty cycle — cheap enough to be worth the tighter handoff.
+SCROLL_POLL_MS = 100
+# The ceiling only matters at the end of the results, where nothing is coming
+# and the caller's quiet-step counter is what decides.
+SCROLL_CEILING_MS = 1500
+# Scroll geometry. Distance adapts within these bounds — see _next_distance.
+SCROLL_DISTANCE_PX = 4000
+SCROLL_DISTANCE_MAX_PX = 6000
+SCROLL_DISTANCE_MIN_PX = 1800
 
 # ============================================================================
 # 🔹 SELECTORS / UI HOOKS — used by the fallback gate flow only.
@@ -399,15 +415,123 @@ async def read_results_estimate(page: Page, timeout_s: float = 8.0) -> int | Non
     return None
 
 
-async def scroll_step(page: Page, distance: int = 4000, pause_s: float = 1.5) -> None:
+async def _dom_card_count(page: Page) -> int:
+    """How many ad cards are in the DOM right now."""
+    return await page.locator("span").filter(has_text=LIBRARY_ID_SPAN_PATTERN).count()
+
+
+async def scroll_step(
+    page: Page,
+    distance: int = SCROLL_DISTANCE_PX,
+    baseline: int | None = None,
+    ceiling_ms: int = SCROLL_CEILING_MS,
+) -> dict:
     """
-    One wheel step down the results pane, with a cooldown pause (keeps
-    latency down and lets lazy-loaded cards render). The scroll+extract
-    LOOP lives in run_scrape (main.py) — estimate-aware, driven by
-    extraction yield, not scrollHeight.
+    One wheel step down the results pane, then wait for the content it asked for.
+
+    The old version was `wheel()` followed by a flat `wait_for_timeout(1500)`.
+    That sleep is paid on every step regardless of whether anything arrived —
+    and when the next batch of cards is already rendered, which it usually is,
+    it is 1.5s of doing nothing. Measured across a 110-result keyword that was
+    61s of the 310s crawl spent asleep.
+
+    Waiting for the card count to actually grow is strictly better than tuning
+    the constant down. Fast render returns immediately; slow render waits
+    LONGER rather than less. The only case that reaches the ceiling is the end
+    of the results, where nothing is coming and the caller's quiet-step
+    counter decides what happens next.
+
+    `baseline` is the card count before the scroll. Passing None falls back to
+    a plain short sleep, for callers with no count to compare against.
+
+    Returns timing so the crawl loop can log where the time went.
     """
+    import time
+
+    started = time.monotonic()
     await page.mouse.wheel(0, distance)
-    await page.wait_for_timeout(int(pause_s * 1000))
+
+    if baseline is None:
+        await page.wait_for_timeout(SCROLL_FLOOR_MS)
+        return {"waited_ms": SCROLL_FLOOR_MS, "grew": True, "count": None}
+
+    polls = 0
+    count = baseline
+    while True:
+        # A floor as well as a ceiling: when Meta renders in 20ms we should not
+        # hot-spin the count() call at it.
+        await page.wait_for_timeout(SCROLL_POLL_MS)
+        polls += 1
+        try:
+            count = await _dom_card_count(page)
+        except Exception as exc:  # noqa: BLE001 - a transient DOM error is not fatal
+            logger.debug("⚠️ Card count failed during scroll wait: %s", exc)
+            break
+        if count > baseline:
+            break
+        if polls * SCROLL_POLL_MS >= ceiling_ms:
+            break
+
+    return {
+        "waited_ms": int((time.monotonic() - started) * 1000),
+        "grew": polls * SCROLL_POLL_MS < ceiling_ms,
+        # Carried forward as the next step's baseline, so the count this call
+        # already made does not have to be made again.
+        "count": count,
+    }
+
+
+class ScrollPacer:
+    """
+    How far to scroll next, adapted to what the last step actually returned.
+
+    Scrolling further covers more ground per round-trip to Meta, and a round
+    trip costs seconds — so a bigger step is a real saving. The risk is silent
+    data loss: Meta's results list is virtualised, so a jump large enough to
+    outrun the renderer skips past cards that were rendered and never handed to
+    us. That failure is invisible — the crawl just finds fewer ads.
+
+    So the distance is earned, not assumed. A step that yields new cards is
+    evidence the distance is safe and the pacer grows toward the maximum. A
+    step that yields nothing, after already waiting out the full ceiling, is
+    evidence the opposite: we probably outran the renderer, so the next step
+    is halved. Three consecutive misses drop it to the floor, from which it
+    climbs back one step at a time.
+
+    At the genuine bottom of the results this also halves — harmless, because
+    the caller's quiet-step counter ends the crawl within three steps anyway.
+    """
+
+    def __init__(
+        self,
+        start: int = SCROLL_DISTANCE_PX,
+        maximum: int = SCROLL_DISTANCE_MAX_PX,
+        minimum: int = SCROLL_DISTANCE_MIN_PX,
+    ):
+        self.distance = start
+        self.maximum = maximum
+        self.minimum = minimum
+        self._misses = 0
+        self._growth = 0
+
+    def reward(self, new_cards: int) -> int:
+        """Report the last step's yield; get the distance for the next one."""
+        if new_cards > 0:
+            self._misses = 0
+            # Geometric growth, capped — doubles within ~3 consecutive hits.
+            self._growth += 1
+            if self._growth >= 2:
+                self.distance = min(self.maximum, int(self.distance * 1.3))
+                self._growth = 0
+        else:
+            self._misses += 1
+            self._growth = 0
+            divisor = 1 if self._misses < 2 else 2
+            self.distance = max(self.minimum, int(self.distance / divisor))
+        return self.distance
+
+    def stats(self) -> dict:
+        return {"distance": self.distance, "misses": self._misses}
 
 
 async def collect_page_html(page: Page, tag: str = "results") -> str:

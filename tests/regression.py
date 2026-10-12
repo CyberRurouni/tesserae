@@ -223,8 +223,11 @@ def test_scraper():
     POPULAR = ["p_0", "p_1", "p_2"]
     keywords = [f"kw{i}" for i in range(6)]
 
-    async def scroll(page):
-        return None
+    scrolls = []
+
+    async def scroll(page, distance=4000, baseline=None, ceiling_ms=1500):
+        scrolls.append(distance)
+        return {"waited_ms": 100, "grew": True, "count": (baseline or 0) + 5}
 
     async def search(page, keyword, filters, dismiss_cookies=False):
         return None
@@ -286,6 +289,39 @@ def test_scraper():
     finally:
         for n, f in saved.items():
             setattr(sm, n, f)
+
+    # The scroll pacer is the guard against silent data loss. Meta's results
+    # list is virtualised, so a step that jumps further than the renderer can
+    # keep up with skips cards — and skipping cards looks exactly like "this
+    # keyword had few results". The only evidence is the distance backing off
+    # after a step that yielded nothing.
+    print("\n[10b] the scroll pacer backs off instead of skipping cards")
+    from modules.scraper.search import (
+        SCROLL_DISTANCE_MAX_PX,
+        SCROLL_DISTANCE_MIN_PX,
+        ScrollPacer,
+    )
+
+    p = ScrollPacer()
+    for _ in range(6):
+        p.reward(4)                       # healthy steps
+    grown = p.distance
+    check("a yielding crawl grows the distance", grown > 4000, f"{grown}px")
+
+    for _ in range(4):
+        p.reward(0)                       # we outran the renderer
+    check("repeated misses back off to the floor", p.distance == SCROLL_DISTANCE_MIN_PX,
+          f"{p.distance}px")
+
+    for _ in range(8):
+        p.reward(3)                       # recovery
+    check("it climbs back after recovery", p.distance > SCROLL_DISTANCE_MIN_PX,
+          f"{p.distance}px")
+    check("it never exceeds the ceiling", p.distance <= SCROLL_DISTANCE_MAX_PX,
+          f"{p.distance}px")
+
+    check("the floor is a real floor",
+          ScrollPacer().reward(0) >= SCROLL_DISTANCE_MIN_PX // 2)
 
 
 # ── 6. cycle semantics unchanged ────────────────────────────────────────────

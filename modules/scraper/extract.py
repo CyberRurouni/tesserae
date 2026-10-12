@@ -41,6 +41,9 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 LIBRARY_ID_TEXT = re.compile(r"Library ID:\s*(\d+)")
+# Same anchor without the capture group, for locating cards rather than parsing
+# one. search.py uses it to count what is on screen without extracting it.
+LIBRARY_ID_SPAN_PATTERN = re.compile(r"Library ID:\s*\d+")
 CARD_XPATH = "ancestor::div[.//*[contains(@class, '_8nsi')]][1]"
 
 CREATIVE = "._8nsi"                                   # identity block only (logo + advertiser)

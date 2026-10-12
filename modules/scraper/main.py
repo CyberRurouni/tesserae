@@ -21,6 +21,7 @@ from modules.verdicts import FilterIndex as get_filter_index
 
 from .seen import RunSeenIds
 from .search import (
+    ScrollPacer,
     apply_filters,
     collect_page_html,
     empty_results,
@@ -242,6 +243,13 @@ async def _scrape_keyword(
     quiet_steps = 0
     steps = 0
 
+    # Scroll pacing state, and the per-step timings that explain where this
+    # keyword's wall-clock went. Tuning a crawl without these means guessing.
+    pacer = ScrollPacer()
+    dom_cards: int | None = None
+    waited: list[int] = []
+    distance_used: list[int] = []
+
     logger.info(
         "%s🎯 Crawl plan: estimate~%s, target %s unique, quiet budget %s, cap %d steps",
         tag, estimate if estimate is not None else "?", target_unique, quiet_budget, hard_steps,
@@ -303,7 +311,24 @@ async def _scrape_keyword(
                             tag, quiet_steps, len(seen_ids), estimate)
             break
 
-        await scroll_step(page)
+        # Scroll, then wait for the cards that scroll asked for rather than
+        # sleeping a fixed 1.5s and hoping. The distance adapts: it grows while
+        # steps keep yielding and halves after one that does not, so a jump big
+        # enough to outrun the renderer corrects itself instead of quietly
+        # skipping cards.
+        pacer.reward(len(new_ads))
+        if dom_cards is None:
+            from .search import _dom_card_count
+
+            try:
+                dom_cards = await _dom_card_count(page)
+            except Exception:  # noqa: BLE001
+                dom_cards = 0
+        timing = await scroll_step(page, distance=pacer.distance, baseline=dom_cards)
+        if timing.get("count") is not None:
+            dom_cards = timing["count"]
+        waited.append(timing["waited_ms"])
+        distance_used.append(pacer.distance)
 
     if not keyword_ads and not empty_page:
         # Nothing matched the selectors — dump the results page so the card
@@ -345,6 +370,13 @@ async def _scrape_keyword(
         f" ({deferred_renewed} deferrals renewed)" if deferred_renewed else "",
         heuristic_passed, len(fresh),
     )
+    if waited:
+        logger.info(
+            "%s⏱️  %r: %d scroll(s), %dms waiting for content (avg %dms), distance %d→%dpx",
+            tag, keyword, len(waited), sum(waited),
+            sum(waited) // len(waited),
+            distance_used[0], distance_used[-1],
+        )
     return fresh
 
 
