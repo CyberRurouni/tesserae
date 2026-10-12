@@ -38,6 +38,46 @@ class Category(BaseModel):
         return self.heuristics.model_dump()
 
 
+# Words that mean "this ad is offering work", any one of which is enough.
+#
+# Deliberately generous. A false positive costs one AI call; a false negative
+# costs the lead forever, because the ad never reaches the judge and so can
+# never be accepted, deferred or even recorded. The list is biased towards
+# letting ads through.
+HIRING_VOCABULARY = [
+    "hiring",
+    "we're hiring",
+    "we are hiring",
+    "now hiring",
+    "join our team",
+    "join us",
+    "apply now",
+    "apply today",
+    "applications open",
+    "vacancy",
+    "vacancies",
+    "job opening",
+    "job openings",
+    "career opportunity",
+    "opportunity available",
+    "looking for a",
+    "looking for an",
+    "we're looking",
+    "we are looking",
+    "seeking a",
+    "seeking an",
+    "recruiting",
+    "recruitment",
+    "position available",
+    "open position",
+    "now accepting applications",
+    "work with us",
+    "freelance",
+    "contract role",
+    "internship",
+]
+
+
 # The category registry — the frontend's option list, one entry today.
 CATEGORIES: dict[str, Category] = {
     "career_jobs": Category(
@@ -58,7 +98,18 @@ CATEGORIES: dict[str, Category] = {
             "words it borrows."
         ),
         heuristics=CategoryHeuristics(
-            require_ad_text_patterns=["hiring"],
+            # OR, not AND. This used to be require_ad_text_patterns=["hiring"],
+            # which meant an ad survived only if it contained that one exact
+            # word. Real job ads say "join our team", "now accepting
+            # applications", "vacancy", "opportunity available" — a single
+            # captured run dropped 112 of 119 harvested ads before the AI was
+            # given a chance to judge any of them, and the run reported zero.
+            #
+            # "Does this offer work" is a judgement, not a substring test, and
+            # the AI checkpoint already makes it properly. What is left here is
+            # a cheap pre-sieve: catch the obvious non-jobs (courses, bootcamps,
+            # job boards) and let everything else through to be judged.
+            require_any_ad_text_patterns=list(HIRING_VOCABULARY),
             exclude_ad_text_patterns=["course", "enroll"],
         ),
     ),

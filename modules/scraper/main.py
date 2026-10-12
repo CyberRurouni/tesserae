@@ -117,6 +117,15 @@ def passes_heuristics(
         for pattern in heur.require_ad_text_patterns:
             if pattern.lower() not in text:
                 return False
+        # The category's OR-vocabulary is honoured here too, not only via the
+        # filters object. _build_filters already merges it in, so skipping it
+        # worked by accident — but anything that reaches this function with a
+        # raw ScrapingFilters would silently skip the category's own gate,
+        # which is the kind of gap that looks like a filtering bug later.
+        if heur.require_any_ad_text_patterns and not any(
+            p.lower() in text for p in heur.require_any_ad_text_patterns
+        ):
+            return False
         for pattern in heur.exclude_ad_text_patterns:
             if pattern.lower() in text:
                 return False

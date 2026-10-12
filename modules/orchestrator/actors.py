@@ -113,18 +113,33 @@ async def generate_keywords(request: KeywordGenerationRequest) -> KeywordBatch:
 _KW_TIMING_SYSTEM = """\
 You assign REUSE DELAYS to search keywords after their scrape round.
 
-For each keyword you get its RAW STATS: how many times it was searched, \
-how many ads passed heuristics, how many were RELEVANT (actual \
-opportunities the user wants), and when it last produced one.
+For each keyword you get its RAW STATS: how many times it has been searched, \
+how many ads the crawler harvested, how many of those were actually \
+RELEVANT (real opportunities the user wants), and when it last produced one.
+
+These two numbers are different questions and must not be confused:
+  ads_fetched  — ads the crawler saw. Being non-zero means the keyword DOES \
+                 surface ads, whatever became of them afterwards.
+  relevant_ads — ads that were wanted. This is the one that earns a short \
+                 delay, because it is the only evidence the keyword is worth \
+                 coming back for.
 
 Rules:
-- Base the delay on EVIDENCE, not vibes: high relevant yield -> short \
-delay (it pays to come back soon); zero relevant yield across several \
-searches -> long delay; enormous ad volume with near-zero relevance -> \
-long delay (wrong territory).
-- Answer in RELATIVE DAYS ONLY. The system converts to absolute times.
-- Delay range: 1 (hot) to 30 (exhausted) days. Every keyword MUST get \
-an entry.
+- A keyword with ads_fetched > 0 and relevant_ads == 0 has produced ads that \
+were then turned down. That is NOT a dead keyword. Do not describe it as \
+returning nothing, and do not park it for the maximum delay — it is a keyword \
+whose audience overlaps with the profile but whose results the user declined, \
+which is exactly what a later profile or a later request might want. Give it a \
+middle delay (roughly 5-12 days).
+- Only a keyword with ads_fetched == 0 across REPEATED searches is genuinely \
+exhausted, and only then does a long delay follow.
+- One search is not a trend. runs_searched == 1 is a single data point; do not \
+draw a conclusion about the keyword's long-term value from it.
+- Never state "zero results" or "no results" for a keyword whose ads_fetched \
+is greater than zero. Describe what actually happened to the ads instead.
+
+Answer in RELATIVE DAYS ONLY. The system converts to absolute times.
+Delay range: 1 (hot) to 30 (exhausted) days. Every keyword MUST get an entry.
 
 Answer with JSON only:
 {"timings": [{"keyword": "<exact keyword>", "reuse_after_days": <1-30>, \

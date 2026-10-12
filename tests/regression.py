@@ -376,6 +376,45 @@ def test_scraper():
     check("normalising never returns empty for real text",
           normalize_ad_text("  x  ") == "x")
 
+    # The first-sieve must not be the thing that decides relevance. It used to
+    # be require_ad_text_patterns=["hiring"] — an AND gate on one exact word —
+    # and a real run dropped 112 of 119 harvested ads before the AI saw any,
+    # then reported zero.
+    print("\n[10e] the pre-sieve does not decide relevance on one word")
+    from core.schemas.category import CATEGORIES, HIRING_VOCABULARY
+    from core.schemas.ad import AdRecord as _AR
+    from modules.scraper.main import passes_heuristics as _ph
+    from core.schemas.filters import ScrapingFilters as _SF
+
+    cat = CATEGORIES["career_jobs"]
+    check("the category uses OR, not AND",
+          not cat.heuristics.require_ad_text_patterns
+          and bool(cat.heuristics.require_any_ad_text_patterns),
+          f"and={cat.heuristics.require_ad_text_patterns}")
+
+    def sieve(text):
+        return _ph(_AR(ad_archive_id="x", ad_text=text), _SF(category="career_jobs"), cat)
+
+    # Real phrasings that carry no literal "hiring" and were being discarded.
+    for phrase in (
+        "Join our team of backend engineers.",
+        "Now accepting applications for a Python developer role.",
+        "Vacancy available: FastAPI developer, remote.",
+        "We are looking for a software engineer to join our Berlin office.",
+        "Contract role available for an automation specialist.",
+    ):
+        check(f"kept: {phrase[:38]!r}", sieve(phrase), "dropped by the sieve")
+
+    # Non-jobs still caught cheaply, without the AI.
+    check("courses are still excluded",
+          not sieve("Enroll in our Python course today."))
+    check("an ad with no text is still dropped", not sieve(""))
+
+    # The whole point: a false positive costs one AI call, a false negative
+    # costs the lead permanently, so the vocabulary leans permissive.
+    check("the vocabulary is not a single word", len(HIRING_VOCABULARY) >= 10,
+          f"{len(HIRING_VOCABULARY)} terms")
+
     # A pane that will not scroll is a fault, not a finding. Counting it toward
     # the quiet budget ends the keyword and reports it as searched — the exact
     # "it just stopped" symptom, and the reason the budget must ignore it.
