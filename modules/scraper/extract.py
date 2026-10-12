@@ -34,6 +34,8 @@ from playwright.async_api import Page
 
 from core import AdRecord
 
+from modules.fingerprint import ad_fingerprint
+
 logger = logging.getLogger(__name__)
 
 # ============================================================================
@@ -95,15 +97,24 @@ async def extract_ads_from_page(
     page: Page,
     source_keyword: str,
     seen_ids: set[str] | None = None,
+    seen_fingerprints: set[str] | None = None,
 ) -> list[AdRecord]:
     """
     Extract the ad cards currently in the DOM into AdRecords (new ones
     only, when the caller supplies `seen_ids`). Heuristic-only — no AI
     here. Cards are anchored on their Library ID span, so extraction
     survives Meta's class-name churn.
+
+    `seen_fingerprints` collapses the same creative published under several
+    Library IDs, which is what Meta does for one ad run across platforms.
+    Checked AFTER the id, because the id is what decides "already harvested
+    this run" and the fingerprint decides "this is the same ad wearing a
+    different number".
     """
     records: list[AdRecord] = []
     seen = seen_ids if seen_ids is not None else set()
+    seen_prints = seen_fingerprints if seen_fingerprints is not None else set()
+    collapsed = 0
 
     id_spans = page.locator("span").filter(has_text=re.compile(r"Library ID:\s*\d+"))
     count = await id_spans.count()
@@ -188,12 +199,25 @@ async def extract_ads_from_page(
                 source_keyword=source_keyword,
                 heuristic_labels=labels,
             )
+            # Same creative under a different Library ID — Meta does this for one
+            # ad run across platforms. Kept out of the results, because five
+            # rows of one ad is five times the reading for the user and five
+            # times the AI cost, and the user already saw the first one.
+            fingerprint = ad_fingerprint(advertiser_name, ad_text)
+            if fingerprint and fingerprint in seen_prints:
+                collapsed += 1
+                continue
+            if fingerprint:
+                seen_prints.add(fingerprint)
+                record.ad_fingerprint = fingerprint
             records.append(record)
         except Exception as e:
             logger.debug("⚠️ Skipped card %d for keyword %r: %s", i, source_keyword, e)
 
     logger.info(
-        "✅ Extracted %d new cards this pass (total unique: %d) for keyword %r",
-        len(records), len(seen), source_keyword,
+        "✅ Extracted %d new cards this pass (total unique: %d%s) for keyword %r",
+        len(records), len(seen),
+        f", {collapsed} duplicate creative(s) collapsed" if collapsed else "",
+        source_keyword,
     )
     return records

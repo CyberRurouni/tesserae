@@ -72,6 +72,22 @@ STAGE 2 — is the role inside what this person actually does?
           as universally useless.
   YES -> go to stage 3.
 
+  Stage 2 is about the ROLE, not the vocabulary around it. Judge what the \
+  person would actually DO all day, and require that the ad names that work \
+  as the job itself — not as a tool the job happens to touch, not as a team \
+  they would interface with, not as an automation they would maintain.
+
+  Mentions of your field do not make it your field. A virtual assistant / \
+  account manager role that will "support website, automation and AI-related \
+  delivery", and asks for media-buying and design skills, is an operations \
+  and client-services job. It is not a software engineering role, however many \
+  of your keywords appear in it. The same applies to roles that merely \
+  coordinate, oversee, administer or sell the kind of work you do.
+
+  Ask: if this person were hired, would their actual day-to-day be the work \
+  their profile describes? If the honest answer is "some of it, alongside a \
+  lot of something else", that is "not_for_me".
+
 STAGE 3 — is it wanted under the current request?
   YES -> outcome "accepted"
   NO  -> outcome "deferred". Right field, wrong moment. NOT trash: they may \
@@ -84,7 +100,9 @@ either hides a good lead forever, or re-judges junk for every profile.
 
 Judging rules:
 - Judge the ad's CONTENT, never the mere presence of keywords. An ad \
-containing the word "hiring" is not enough — it must actually offer a role.
+containing the word "hiring" is not enough — it must actually offer a role. \
+The same applies to your field's vocabulary: an ad full of your keywords can \
+still be a job you would not take.
 - Seniority, contract vs permanent, and remote-vs-onsite are REQUEST \
 questions, never profile questions: they can defer an ad, never reject it.
 - Company location and employer nationality are REQUEST questions unless the \

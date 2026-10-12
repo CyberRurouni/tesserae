@@ -26,6 +26,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
+from interface import log_buffer
 from interface.profiles_api import router as profiles_router
 from interface.heuristics_api import router as heuristics_router
 from interface.orchestrate import _run_with_filters
@@ -368,6 +369,21 @@ async def health():
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
 
 
+@app.get("/api/logs")
+async def recent_logs(limit: int = 200, logger: str | None = None):
+    """
+    The live log tail, for the run page.
+
+    Read-only and deliberately dumb: it returns the most recent lines the
+    process has emitted. Enough to answer "is it working, and on what" while a
+    run is going, without opening a terminal or waiting for a log to flush.
+    """
+    return {
+        "file": str(LOG_FILE),
+        "lines": log_buffer.snapshot(limit=limit, name_filter=logger),
+    }
+
+
 @app.post("/api/runs")
 async def start_run(request: RunRequest, background_tasks: BackgroundTasks):
     """Start a new orchestrator run and return immediately."""
@@ -548,6 +564,11 @@ def configure_logging() -> None:
     fmt = logging.Formatter(
         "%(asctime)s | %(levelname)-7s | %(name)-28s | %(message)s"
     )
+
+    # Live tail for the browser. The file below is the durable record; this is
+    # what lets a run be watched while it happens, so it can be stopped on
+    # evidence rather than on suspicion.
+    log_buffer.install(fmt)
 
     console = logging.StreamHandler(sys.stdout)
     console.setFormatter(fmt)

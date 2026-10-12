@@ -5,6 +5,8 @@ import Link from 'next/link';
 import { Button } from '@/components/ui/Button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card';
 import { STATUS_LABELS, STATUS_STYLES } from '@/components/runs/shared';
+import ExpandableText from '@/components/runs/ExpandableText';
+import LiveLog from '@/components/runs/LiveLog';
 import { isTerminalStatus } from '@/lib/runs';
 import { cn } from '@/lib/utils';
 
@@ -310,11 +312,15 @@ export function RunDetail({ runId }) {
                   {run.total_keywords === 1 ? '' : 's'} finished
                 </span>
               )}
-              {run.log_hint && <span className="ml-auto opacity-70">{run.log_hint}</span>}
+              {run.log_hint && (
+                <span className="ml-auto font-mono opacity-70">{run.log_hint}</span>
+              )}
             </div>
           </CardContent>
         </Card>
       )}
+
+      <LiveLog active={isLive} />
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Stat label="Accepted" value={accepted.length} tone="text-success" />
@@ -394,8 +400,8 @@ export function RunDetail({ runId }) {
                         <td className="max-w-[180px] truncate px-4 py-3 font-medium text-foreground">{ad.advertiser_name || '—'}</td>
                         <td className="max-w-[160px] truncate px-4 py-3 text-muted-foreground">{ad.source_keyword || '—'}</td>
                         <td className="max-w-[160px] truncate px-4 py-3">{ad.cta_text || '—'}</td>
-                        <td className="max-w-[320px] px-4 py-3 text-muted-foreground">
-                          <span className="line-clamp-3">{ad.ad_text || '—'}</span>
+                        <td className="min-w-[280px] px-4 py-3 text-muted-foreground">
+                          <ExpandableText text={ad.ad_text} />
                         </td>
                         <td className="px-4 py-3">
                           {link ? (

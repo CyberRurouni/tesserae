@@ -34,4 +34,7 @@ class AdRecord(BaseModel):
     category: str | None = None            # the lens this ad was judged under
     source_keyword: str | None = None
     heuristic_labels: list[str] = Field(default_factory=list)
+    # Content identity, independent of ad_archive_id. Meta issues one id per
+    # platform, so five ids can be one ad; this is what collapses them.
+    ad_fingerprint: str = ""
     fetched_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

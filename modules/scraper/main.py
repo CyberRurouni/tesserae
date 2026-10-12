@@ -199,6 +199,7 @@ async def _scrape_keyword(
     profile_id: str | None,
     request_id: str | None,
     seen_ids: set[str],
+    seen_prints: set[str],
     extract_lock: asyncio.Lock,
     is_first_keyword: bool,
     worker_label: str = "",
@@ -266,7 +267,8 @@ async def _scrape_keyword(
         # must be read-then-written atomically or two workers harvest one card.
         async with extract_lock:
             new_ads = await extract_ads_from_page(
-                page, source_keyword=keyword, seen_ids=seen_ids
+                page, source_keyword=keyword, seen_ids=seen_ids,
+                seen_fingerprints=seen_prints,
             )
         step_ids = [ad.ad_archive_id for ad in new_ads]
         # "Already decided" has to be answered BEFORE we publish this step, or
@@ -468,6 +470,9 @@ async def _scrape_on(
     # usually matches several keywords, and re-harvesting it per keyword is what
     # produced duplicate rows in the run files.
     seen_ids: set[str] = set()
+    # Same ads, different Library IDs. Meta issues one id per platform, so an
+    # id set alone cannot tell one creative from five copies of it.
+    seen_prints: set[str] = set()
     extract_lock = asyncio.Lock()
 
     workers = max(1, min(int(parallel_workers or 1), len(keywords)))
@@ -479,8 +484,8 @@ async def _scrape_on(
             for idx, keyword in enumerate(keywords):
                 batch = await _scrape_keyword(
                     page, keyword, filters, category, cat_id, run_seen, filter_index,
-                    profile_id, request_id, seen_ids, extract_lock,
-                    is_first_keyword=(idx == 0),
+                    profile_id, request_id, seen_ids, seen_prints,
+                    extract_lock, is_first_keyword=(idx == 0),
                 )
                 fresh.extend(batch)
                 # Report each keyword the moment it lands. A run that scrapes
@@ -510,7 +515,8 @@ async def _scrape_on(
                     batch = await _scrape_keyword(
                         pages[idx], keyword, filters, category, cat_id, run_seen,
                         filter_index, profile_id, request_id, seen_ids,
-                        extract_lock, is_first_keyword=(idx == 0 and j == 0),
+                        seen_prints, extract_lock,
+                        is_first_keyword=(idx == 0 and j == 0),
                         worker_label=label,
                     )
                     out.extend(batch)

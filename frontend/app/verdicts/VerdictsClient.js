@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { PageShell } from '@/components/Nav';
 import { Button, Input, Badge, Card, CardContent, Spinner } from '@/components/ui';
+import ExpandableText from '@/components/runs/ExpandableText';
 import { cn } from '@/lib/utils';
 
 const PAGE = 25;
@@ -303,10 +304,12 @@ export default function VerdictsClient() {
                         <Badge variant="warning">original ad text no longer on disk</Badge>
                       )}
                     </div>
-                    {item.excerpt ? (
-                      <p className="whitespace-pre-wrap text-sm text-muted-foreground">{item.excerpt}</p>
+                    {item.ad_text ? (
+                      <ExpandableText text={item.ad_text} />
                     ) : (
-                      <p className="text-sm italic text-muted-foreground/60">No ad text stored.</p>
+                      <p className="text-sm italic text-muted-foreground/60">
+                        No ad text stored — the original run file is gone.
+                      </p>
                     )}
                     {item.relevance_reason && (
                       <p className="text-xs text-muted-foreground/80">Why: {item.relevance_reason}</p>

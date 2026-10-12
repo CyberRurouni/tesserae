@@ -249,14 +249,22 @@ def test_scraper():
     async def estimate(page):
         return 40
 
-    async def extract(page, source_keyword=None, seen_ids=None):
+    async def extract(page, source_keyword=None, seen_ids=None, seen_fingerprints=None):
         seen = seen_ids if seen_ids is not None else set()
+        prints = seen_fingerprints if seen_fingerprints is not None else set()
         out = []
         for i in POPULAR + [f"u_{source_keyword}_{n}" for n in range(2)]:
             if i in seen:
                 continue
             seen.add(i)
             out.append(AdRecord(ad_archive_id=i, source_keyword=source_keyword, ad_text="t"))
+            # Mirror the real extractor: identical creative under a new id is
+            # dropped rather than reported twice.
+            from modules.fingerprint import ad_fingerprint as _fp
+            fp = _fp(None, "t")
+            if fp in prints:
+                continue
+            prints.add(fp)
         return out
 
     async def collect(page, tag):
@@ -331,6 +339,43 @@ def test_scraper():
     check("the floor is a real floor",
           ScrollPacer().reward(0) >= SCROLL_DISTANCE_MIN_PX // 2)
 
+    # One creative, five Library IDs. Real case: Meta issues an id per platform,
+    # so a single ad run across Facebook/Instagram/Messenger/Threads/Audience
+    # Network/WhatsApp appears six times and dedup by id cannot see it.
+    print("\n[10d] one ad under five Library IDs is one ad")
+    from modules.fingerprint import ad_fingerprint, normalize_ad_text
+
+    text = ("WE'RE HIRING AN ACCOUNT MANAGER / VIRTUAL ASSISTANT.  "
+            "You will support website, automation and AI-related delivery.")
+    five_ids = [f"10{i:015d}" for i in range(5)]
+    prints = set()
+    kept = []
+    for ad_id in five_ids:
+        fp = ad_fingerprint("Supercharged Talent", text)
+        if fp in prints:
+            continue
+        prints.add(fp)
+        kept.append(ad_id)
+    check("five ids, one creative, one row", len(kept) == 1, f"{len(kept)} kept")
+
+    check("same text, different advertiser, stays two ads",
+          ad_fingerprint("A", text) != ad_fingerprint("B", text))
+
+    check("different text, same advertiser, stays two ads",
+          ad_fingerprint("A", text) != ad_fingerprint("A", text + " extra"))
+
+    check("whitespace and case do not make a new ad",
+          ad_fingerprint("A", "Hello   WORLD") == ad_fingerprint("a", "hello world"))
+
+    check("zero-width marks do not make a new ad",
+          ad_fingerprint("A", "hel﻿lo") == ad_fingerprint("A", "hello"))
+
+    check("an ad with no text has no fingerprint",
+          ad_fingerprint("A", "") == "" and ad_fingerprint("A", None) == "")
+
+    check("normalising never returns empty for real text",
+          normalize_ad_text("  x  ") == "x")
+
     # A pane that will not scroll is a fault, not a finding. Counting it toward
     # the quiet budget ends the keyword and reports it as searched — the exact
     # "it just stopped" symptom, and the reason the budget must ignore it.
@@ -347,7 +392,7 @@ def test_scraper():
             return {"waited_ms": 0, "grew": False, "count": baseline, "moved": False}
         return {"waited_ms": 100, "grew": True, "count": (baseline or 0) + 5, "moved": True}
 
-    async def no_ads(page, source_keyword, seen_ids=None):
+    async def no_ads(page, source_keyword, seen_ids=None, seen_fingerprints=None):
         return []
 
     saved_s = {n: getattr(sm2, n) for n in (
@@ -366,7 +411,7 @@ def test_scraper():
     try:
         out = asyncio.run(sm2._scrape_keyword(
             object(), "stuck keyword", SF(category="career_jobs", keywords=["stuck keyword"]),
-            None, "career_jobs", _RSI(), None, None, None, set(),
+            None, "career_jobs", _RSI(), None, None, None, set(), set(),
             asyncio.Lock(), is_first_keyword=True,
         ))
         # No ads either way; what matters is that it kept trying rather than
