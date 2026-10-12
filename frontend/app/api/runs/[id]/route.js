@@ -98,6 +98,22 @@ export async function GET(request, { params }) {
       recorded_at: saved.recordedAt || live?.started_at || null,
       started_at: live?.started_at || saved.recordedAt || null,
       completed_at: live?.completed_at || null,
+      // Run-intent fields, forwarded so a running search can say what it is
+      // about to do: which profile it judged under, how many workers (tabs),
+      // which mode, and — when harvest mode is on — why the AI is not generating.
+      // This response is built from a whitelist, so a field added upstream and
+      // not added here is silently dropped: the run page would then have no way
+      // to explain its own behaviour.
+      parallel_workers: live?.parallel_workers ?? null,
+      profile_id: live?.profile_id ?? null,
+      profile_about: live?.profile_about ?? null,
+      profile_is_active: live?.profile_is_active ?? null,
+      run_mode: live?.run_mode ?? null,
+      note: live?.note ?? null,
+      // Any requested keyword the run finished without searching. Reported
+      // instead of swallowed: a run that quietly skips what you typed looks
+      // exactly like a run that found nothing.
+      keywords_not_searched: live?.keywords_not_searched ?? [],
       config: live?.config || null,
       current_keyword: live?.current_keyword ?? null,
       keywords: keywordRows,
