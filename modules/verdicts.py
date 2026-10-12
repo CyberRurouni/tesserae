@@ -78,6 +78,25 @@ def _add(key: str, name: str, ids) -> int:
     return len(ids)
 
 
+def _remove(key: str, name: str, ids) -> int:
+    """
+    Drop ids from a set, in both mirrors. Returns how many were actually there.
+
+    Needed because the sets are only writable by the judge today, and a user
+    correcting a wrong verdict is exactly the case where "final" has to yield.
+    JSON is rewritten from the surviving ids rather than patched, so a manual
+    edit can never leave a stale id behind.
+    """
+    doomed = {i for i in ids if i}
+    if not doomed:
+        return 0
+    before = set(_load_mirror(name)) | _members(key)
+    survivors = sorted(before - doomed)
+    _save_mirror(name, survivors)
+    safe_redis_operation(run_state_broker.srem, key, *sorted(doomed & before))
+    return len(doomed & before)
+
+
 # ── global sets ──────────────────────────────────────────────────────────────
 def accepted_ids(category: str) -> set[str]:
     return set(_load_mirror(f"accepted_{category}")) | _members(
@@ -118,6 +137,80 @@ def record_rejected(profile_id: str, ad_ids) -> int:
     return _add(REJECTED_KEY.format(profile_id=profile_id), f"rejected_{profile_id}", ad_ids)
 
 
+# ── corrections ──────────────────────────────────────────────────────────────
+# A verdict the judge got wrong has to be undoable by the user. Accepted and
+# junk are GLOBAL, so correcting one clears it for every profile at once —
+# there is no per-profile copy to also clean up.
+def forget_accepted(category: str, ad_ids) -> int:
+    return _remove(ACCEPTED_KEY.format(category=category), f"accepted_{category}", ad_ids)
+
+
+def forget_junk(category: str, ad_ids) -> int:
+    return _remove(JUNK_KEY.format(category=category), f"junk_{category}", ad_ids)
+
+
+def forget_rejected(profile_id: str, ad_ids) -> int:
+    return _remove(REJECTED_KEY.format(profile_id=profile_id), f"rejected_{profile_id}", ad_ids)
+
+
+def move_rejected(old_profile_id: str, new_profile_id: str, ad_ids) -> int:
+    """
+    Re-file rejections under a different profile, without ever widening them.
+
+    Rejections are the one verdict that is scoped to a person, so a migration
+    like the placeholder→real-profile remap has to MOVE them. Copy-then-delete
+    in that order, so an interrupted move loses nothing: the worst case is the
+    ids still sitting under the old profile, where they are inert rather than
+    applied to the wrong lens.
+    """
+    if old_profile_id == new_profile_id:
+        return 0
+    ids = {i for i in ad_ids if i}
+    if not ids:
+        return 0
+    moving = sorted(ids & rejected_ids(old_profile_id))
+    if not moving:
+        return 0
+    record_rejected(new_profile_id, moving)
+    forget_rejected(old_profile_id, moving)
+    logger.info(
+        "📦 Moved %d rejection(s) from %s to %s", len(moving), old_profile_id, new_profile_id
+    )
+    return len(moving)
+
+
+def set_verdict(category: str, profile_id: str | None, ad_id: str, outcome: str) -> None:
+    """
+    Put one ad in exactly one bucket, clearing it from the others.
+
+    The sets are consulted in priority order, so an id left in two of them
+    silently keeps the first one's answer — an ad marked both junk and
+    accepted would stay skipped even after the user un-junked it. Assigning
+    therefore clears every other bucket rather than only adding.
+    """
+    ad_id = str(ad_id or "").strip()
+    if not ad_id:
+        raise ValueError("ad_id is required")
+
+    if outcome not in {"accepted", "junk", "rejected", "none"}:
+        raise ValueError(f"unknown outcome {outcome!r}")
+
+    forget_accepted(category, [ad_id])
+    forget_junk(category, [ad_id])
+    if profile_id:
+        forget_rejected(profile_id, [ad_id])
+
+    if outcome == "accepted":
+        record_accepted(category, [ad_id])
+    elif outcome == "junk":
+        record_junk(category, [ad_id])
+    elif outcome == "rejected":
+        if not profile_id:
+            raise ValueError("rejected needs a profile — it is the one scoped verdict")
+        record_rejected(profile_id, [ad_id])
+    logger.info("✏️  %s → %s (profile=%s)", ad_id, outcome, profile_id or "—")
+
+
 def is_rejected(profile_id: str, ad_id: str) -> bool:
     return ad_id in rejected_ids(profile_id)
 
@@ -140,15 +233,15 @@ class FilterIndex:
         self._accepted = accepted_ids(category)
         self._junk = junk_ids(category)
         self._rejected = rejected_ids(profile_id) if profile_id else set()
-        # Deferred is owned by modules.families.deferred during the transition;
+        # Deferred is owned by modules.profiles.deferred during the transition;
         # imported lazily so this module stays usable without it.
         self._deferred: dict[str, str] = {}
         if profile_id and request_id:
             try:
-                from modules.families.deferred import load as _load_deferred
+                from modules.profiles.deferred import load as _load_deferred
 
                 self._deferred = {
-                    r["ad_archive_id"]: r.get("request_family_id", "")
+                    r["ad_archive_id"]: r.get("request_id", "")
                     for r in _load_deferred(profile_id)
                     if r.get("ad_archive_id")
                 }

@@ -1,7 +1,7 @@
 """
-families/ — profiles, their requests, and their lead lists.
+profiles/ — profiles, their requests, and their lead lists.
 
-Kept after the family model was simplified: profiles still exist (one job
+Kept after the profile model was simplified: profiles still exist (one job
 objective each, with their own per-profile rejections and lead list), but they
 no longer carry a taxonomy, lineage, or seeding. Creating a profile now just
 means starting with empty per-profile state — accepted leads and universal junk

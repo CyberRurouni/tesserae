@@ -12,7 +12,7 @@ function ChangeBanner({ verdict, busy }) {
   if (busy && !verdict) return <p className="text-xs text-muted-foreground">Reading your edit…</p>;
   if (!verdict) return null;
 
-  if (!verdict.new_family_required) {
+  if (!verdict.new_profile_required) {
     return (
       <div className="rounded-xl border border-success/40 bg-success/10 px-4 py-3 text-sm">
         <p className="font-semibold text-foreground">No change to what you want</p>
@@ -48,7 +48,7 @@ function ChangeBanner({ verdict, busy }) {
 
 export default function LookingForClient() {
   const [data, setData] = useState(null);
-  const [familyId, setFamilyId] = useState(null);
+  const [profileId, setProfileId] = useState(null);
   const [requestId, setRequestId] = useState(null);
   const [draft, setDraft] = useState('');
   const [dirty, setDirty] = useState(false);
@@ -60,12 +60,12 @@ export default function LookingForClient() {
   const timer = useRef(null);
 
   const load = useCallback(async () => {
-    const res = await fetch('/api/families', { cache: 'no-store' });
+    const res = await fetch('/api/profiles', { cache: 'no-store' });
     const body = await res.json();
     setData(body);
-    setFamilyId((prev) => {
-      if (prev && body.families.some((f) => f.family_id === prev)) return prev;
-      return body.active_family_id || body.families[0]?.family_id || null;
+    setProfileId((prev) => {
+      if (prev && body.profiles.some((f) => f.profile_id === prev)) return prev;
+      return body.active_profile_id || body.profiles[0]?.profile_id || null;
     });
   }, []);
 
@@ -73,30 +73,30 @@ export default function LookingForClient() {
     load().catch(() => setMessage({ tone: 'error', text: 'Could not load your profiles.' }));
   }, [load]);
 
-  const families = data?.families ?? [];
-  const family = families.find((f) => f.family_id === familyId) ?? null;
-  const requests = family?.requests ?? [];
-  const request = requests.find((r) => r.request_family_id === requestId) ?? null;
+  const profiles = data?.profiles ?? [];
+  const profile = profiles.find((f) => f.profile_id === profileId) ?? null;
+  const requests = profile?.requests ?? [];
+  const request = requests.find((r) => r.request_id === requestId) ?? null;
 
   useEffect(() => {
-    const current = (data?.families ?? []).find((f) => f.family_id === familyId);
+    const current = (data?.profiles ?? []).find((f) => f.profile_id === profileId);
     const first = current?.requests?.[0];
-    setRequestId(first?.request_family_id ?? null);
+    setRequestId(first?.request_id ?? null);
     setDraft(first?.request_text ?? '');
     setDirty(false);
     setVerdict(null);
-  }, [familyId, data]);
+  }, [profileId, data]);
 
   useEffect(() => {
-    if (!familyId) return;
+    if (!profileId) return;
     const url = requestId
-      ? `/api/families/${familyId}/deferred?request_family_id=${requestId}`
-      : `/api/families/${familyId}/deferred`;
+      ? `/api/profiles/${profileId}/deferred?request_id=${requestId}`
+      : `/api/profiles/${profileId}/deferred`;
     fetch(url, { cache: 'no-store' })
       .then((r) => r.json())
       .then((b) => setDeferred(b.deferred ?? []))
       .catch(() => setDeferred([]));
-  }, [familyId, requestId]);
+  }, [profileId, requestId]);
 
   useEffect(() => {
     if (!dirty || !draft.trim()) {
@@ -107,10 +107,10 @@ export default function LookingForClient() {
     clearTimeout(timer.current);
     timer.current = setTimeout(async () => {
       try {
-        const res = await fetch('/api/families/request/classify', {
+        const res = await fetch('/api/profiles/request/classify', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: draft, family_id: familyId, request_family_id: requestId }),
+          body: JSON.stringify({ text: draft, profile_id: profileId, request_id: requestId }),
         });
         if (res.ok) setVerdict(await res.json());
       } catch {
@@ -120,19 +120,19 @@ export default function LookingForClient() {
       }
     }, CLASSIFY_DEBOUNCE_MS);
     return () => clearTimeout(timer.current);
-  }, [draft, dirty, familyId, requestId]);
+  }, [draft, dirty, profileId, requestId]);
 
   const save = async (accept = true) => {
     setBusy(true);
     setMessage(null);
     try {
-      const res = await fetch('/api/families/request/apply', {
+      const res = await fetch('/api/profiles/request/apply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text: draft,
-          family_id: familyId,
-          request_family_id: requestId,
+          profile_id: profileId,
+          request_id: requestId,
           accept,
         }),
       });
@@ -154,7 +154,7 @@ export default function LookingForClient() {
             : 'Request updated.',
       });
       await load();
-      if (body.request?.request_family_id) setRequestId(body.request.request_family_id);
+      if (body.request?.request_id) setRequestId(body.request.request_id);
     } catch (error) {
       setMessage({ tone: 'error', text: error.message });
     } finally {
@@ -170,7 +170,7 @@ export default function LookingForClient() {
     );
   }
 
-  if (families.length === 0) {
+  if (profiles.length === 0) {
     return (
       <PageShell
         eyebrow="Step 2 of 3"
@@ -202,14 +202,14 @@ export default function LookingForClient() {
               <CardDescription>Requests belong to one profile.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-2">
-              {families.map((f) => (
+              {profiles.map((f) => (
                 <button
-                  key={f.family_id}
+                  key={f.profile_id}
                   type="button"
-                  onClick={() => setFamilyId(f.family_id)}
+                  onClick={() => setProfileId(f.profile_id)}
                   className={cn(
                     'w-full rounded-xl border p-3 text-left transition-colors',
-                    f.family_id === familyId
+                    f.profile_id === profileId
                       ? 'border-primary bg-primary/10'
                       : 'border-border/60 hover:border-primary/40 hover:bg-accent/40'
                   )}
@@ -232,17 +232,17 @@ export default function LookingForClient() {
               )}
               {requests.map((r) => (
                 <button
-                  key={r.request_family_id}
+                  key={r.request_id}
                   type="button"
                   onClick={() => {
-                    setRequestId(r.request_family_id);
+                    setRequestId(r.request_id);
                     setDraft(r.request_text);
                     setDirty(false);
                     setVerdict(null);
                   }}
                   className={cn(
                     'w-full rounded-xl border p-3 text-left text-xs transition-colors',
-                    r.request_family_id === requestId
+                    r.request_id === requestId
                       ? 'border-primary bg-primary/10'
                       : 'border-border/60 hover:border-primary/40 hover:bg-accent/40'
                   )}
@@ -295,9 +295,9 @@ export default function LookingForClient() {
 
               <div className="flex flex-wrap items-center gap-3">
                 <Button onClick={() => save(true)} loading={busy} disabled={!dirty || !draft.trim()}>
-                  {verdict?.new_family_required ? 'Save as new request' : 'Save request'}
+                  {verdict?.new_profile_required ? 'Save as new request' : 'Save request'}
                 </Button>
-                {verdict?.new_family_required && (
+                {verdict?.new_profile_required && (
                   <Button variant="outline" onClick={() => save(false)} disabled={busy}>
                     Keep my current request
                   </Button>

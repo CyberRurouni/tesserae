@@ -1,5 +1,5 @@
 """
-families_api.py — REST surface for the profile screens.
+profiles_api.py — REST surface for the profile screens.
 
 Split out of interface/main.py because this is a different concern from the run
 lifecycle: these endpoints are synchronous, user-driven, and every one of them
@@ -19,9 +19,9 @@ from pydantic import BaseModel, Field
 
 from genesis.config import ABOUT_US_PATH, ADDITIONAL_FILTERS_PATH
 
-from modules.families import deferred as deferred_store
-from modules.families import store
-from modules.families.classifier import (
+from modules.profiles import deferred as deferred_store
+from modules.profiles import store
+from modules.profiles.classifier import (
     classify_profile_change,
     classify_request_change,
 )
@@ -29,7 +29,7 @@ from modules.verdicts import accepted_ids, junk_ids, rejected_ids
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/families", tags=["families"])
+router = APIRouter(prefix="/api/profiles", tags=["profiles"])
 
 CATEGORY = "career_jobs"
 
@@ -37,36 +37,36 @@ CATEGORY = "career_jobs"
 # ── payloads ────────────────────────────────────────────────────────────────
 class ClassifyProfileRequest(BaseModel):
     text: str
-    family_id: str | None = None
+    profile_id: str | None = None
 
 
 class ApplyProfileRequest(BaseModel):
     text: str
-    family_id: str | None = None
+    profile_id: str | None = None
     accept: bool = True
     about: str | None = None
 
 
 class ClassifyRequestRequest(BaseModel):
     text: str
-    family_id: str
-    request_family_id: str | None = None
+    profile_id: str
+    request_id: str | None = None
 
 
 class ApplyRequestRequest(BaseModel):
     text: str
-    family_id: str
-    request_family_id: str | None = None
+    profile_id: str
+    request_id: str | None = None
     accept: bool = True
 
 
 class ActivateRequest(BaseModel):
-    family_id: str
-    request_family_id: str | None = None
+    profile_id: str
+    request_id: str | None = None
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
-def _sync_profile_file(profile: store.Family, request_text: str) -> None:
+def _sync_profile_file(profile: store.Profile, request_text: str) -> None:
     """
     Mirror the active profile back into the profile files.
 
@@ -79,50 +79,50 @@ def _sync_profile_file(profile: store.Family, request_text: str) -> None:
     ADDITIONAL_FILTERS_PATH.write_text(request_text, encoding="utf-8")
 
 
-def _active_request_text(family_id: str) -> str:
-    requests = store.list_request_families(family_id)
+def _active_request_text(profile_id: str) -> str:
+    requests = store.list_requests(profile_id)
     return requests[0].request_text if requests else ""
 
 
-def _summary(family: store.Family) -> dict:
+def _summary(profile: store.Profile) -> dict:
     """
-    Per-family counts.
+    Per-profile counts.
 
     Global sets are reported once, on the summary of whichever profile you are
     looking at — they are not per-profile facts and repeating them under every
     profile would read as if they were.
     """
     return {
-        "family_id": family.family_id,
-        "about": family.about,
-        "profile_text": family.profile_text,
-        "created_at": family.created_at,
-        "updated_at": family.updated_at,
+        "profile_id": profile.profile_id,
+        "about": profile.about,
+        "profile_text": profile.profile_text,
+        "created_at": profile.created_at,
+        "updated_at": profile.updated_at,
         "counts": {
-            "rejected": len(rejected_ids(family.family_id)),
-            "deferred_stored": len(deferred_store.deferred_ids(family.family_id)),
-            "leads": len(store.load_leads(family.family_id)),
+            "rejected": len(rejected_ids(profile.profile_id)),
+            "deferred_stored": len(deferred_store.deferred_ids(profile.profile_id)),
+            "leads": len(store.load_leads(profile.profile_id)),
         },
         "requests": [
             {
-                "request_family_id": r.request_family_id,
+                "request_id": r.request_id,
                 "request_text": r.request_text,
             }
-            for r in store.list_request_families(family.family_id)
+            for r in store.list_requests(profile.profile_id)
         ],
     }
 
 
 # ── reads ───────────────────────────────────────────────────────────────────
 @router.get("")
-async def list_families():
-    from modules.families.active import read_active
+async def list_profiles():
+    from modules.profiles.active import read_active
 
     current = read_active() or {}
     return {
-        "families": [_summary(f) for f in store.list_families()],
-        "active_family_id": current.get("family_id"),
-        "active_request_family_id": current.get("request_family_id"),
+        "profiles": [_summary(f) for f in store.list_profiles()],
+        "active_profile_id": current.get("profile_id"),
+        "active_request_id": current.get("request_id"),
         "global_counts": {
             "accepted": len(accepted_ids(CATEGORY)),
             "junk": len(junk_ids(CATEGORY)),
@@ -130,52 +130,62 @@ async def list_families():
     }
 
 
-@router.get("/{family_id}/leads")
-async def get_leads(family_id: str):
-    if store.get_family(family_id) is None:
-        raise HTTPException(404, "Family not found")
-    return {"family_id": family_id, "leads": store.load_leads(family_id)}
+@router.get("/{profile_id}/leads")
+async def get_leads(profile_id: str):
+    if store.get_profile(profile_id) is None:
+        raise HTTPException(404, "Profile not found")
+    return {"profile_id": profile_id, "leads": store.load_leads(profile_id)}
 
 
-@router.get("/{family_id}/deferred")
-async def get_deferred(family_id: str, request_family_id: str | None = None):
+@router.get("/{profile_id}/deferred")
+async def get_deferred(profile_id: str, request_id: str | None = None):
     """
     The not-now bucket.
 
-    With `request_family_id`, returns only the ads a DIFFERENT request
+    With `request_id`, returns only the ads a DIFFERENT request
     deferred — i.e. the ones that would be re-judged if that request were
     activated.
     """
-    if store.get_family(family_id) is None:
-        raise HTTPException(404, "Family not found")
+    if store.get_profile(profile_id) is None:
+        raise HTTPException(404, "Profile not found")
     records = (
-        deferred_store.candidates_for_new_request(family_id, request_family_id)
-        if request_family_id
-        else deferred_store.load(family_id)
+        deferred_store.candidates_for_new_request(profile_id, request_id)
+        if request_id
+        else deferred_store.load(profile_id)
     )
-    return {"family_id": family_id, "deferred": records}
+    return {"profile_id": profile_id, "deferred": records}
 
 
 @router.post("/activate")
 async def activate(payload: ActivateRequest):
-    from modules.families.active import read_active, set_active
+    from modules.profiles.active import read_active, set_active
 
-    family = store.get_family(payload.family_id)
-    if family is None:
-        raise HTTPException(404, "Family not found")
+    profile = store.get_profile(payload.profile_id)
+    if profile is None:
+        raise HTTPException(404, "Profile not found")
     current = read_active() or {}
-    request_family_id = payload.request_family_id or current.get("request_family_id")
+    # The carried-over request only counts if it belongs to THIS profile: a
+    # request id from the profile being switched away from would bind runs to
+    # another profile's text, and the deferred bucket would never match.
+    carried = current.get("request_id")
+    if carried and store.get_request(carried) is not None and \
+            store.get_request(carried).profile_id != payload.profile_id:
+        carried = None
+    request_id = payload.request_id or carried
+    if not request_id:
+        requests = store.list_requests(payload.profile_id)
+        request_id = requests[-1].request_id if requests else None
     # Never fall back to "": a profile with no request would blank the file.
-    _sync_profile_file(family, _active_request_text(payload.family_id) or request_text_of(request_family_id))
-    set_active(payload.family_id, request_family_id)
-    return {"status": "activated", "family_id": payload.family_id,
-            "request_family_id": request_family_id}
+    _sync_profile_file(profile, _active_request_text(payload.profile_id) or request_text_of(request_id))
+    set_active(payload.profile_id, request_id)
+    return {"status": "activated", "profile_id": payload.profile_id,
+            "request_id": request_id}
 
 
-def request_text_of(request_family_id: str | None) -> str:
-    if not request_family_id:
+def request_text_of(request_id: str | None) -> str:
+    if not request_id:
         return ""
-    existing = store.get_request_family(request_family_id)
+    existing = store.get_request(request_id)
     return existing.request_text if existing else ""
 
 
@@ -190,9 +200,9 @@ async def classify_profile(payload: ClassifyProfileRequest):
     they commit to anything.
     """
     current_text = ""
-    family = store.get_family(payload.family_id) if payload.family_id else None
-    if family:
-        current_text = family.profile_text
+    profile = store.get_profile(payload.profile_id) if payload.profile_id else None
+    if profile:
+        current_text = profile.profile_text
 
     verdict = await classify_profile_change(current_text, payload.text)
 
@@ -200,13 +210,13 @@ async def classify_profile(payload: ClassifyProfileRequest):
     # so a brand-new profile is never "a change of objective". Left as-is the
     # classifier compares against empty text and can invent a structural change
     # that does not exist.
-    if not family:
+    if not profile:
         verdict.change = "none"
-        verdict.new_family_required = False
+        verdict.new_profile_required = False
 
     return {
         "change": verdict.change,
-        "new_family_required": verdict.new_family_required,
+        "new_profile_required": verdict.new_profile_required,
         "about": verdict.about,
         "explanation": verdict.explanation,
     }
@@ -229,71 +239,71 @@ async def apply_profile(payload: ApplyProfileRequest):
     if not text:
         raise HTTPException(400, "Profile text cannot be empty")
 
-    from modules.families.active import read_active, set_active
+    from modules.profiles.active import read_active, set_active
 
-    family = store.get_family(payload.family_id) if payload.family_id else None
+    profile = store.get_profile(payload.profile_id) if payload.profile_id else None
     current = read_active() or {}
 
     # ── a brand-new profile ───────────────────────────────────────────────
-    if family is None:
+    if profile is None:
         verdict = await classify_profile_change("", text)
-        created = store.create_family(
+        created = store.create_profile(
             about=verdict.about or payload.about or "Untitled profile",
             profile_text=text,
         )
         # A profile with no request would leave the request file blank, so give
         # it one from whatever the user currently has.
-        request_family = store.create_request_family(
-            created.family_id, request_text_of(current.get("request_family_id"))
+        request_obj = store.create_request(
+            created.profile_id, request_text_of(current.get("request_id"))
         )
-        set_active(created.family_id, request_family.request_family_id)
-        _sync_profile_file(created, request_family.request_text)
-        logger.info("🌱 New profile %s created (about=%r)", created.family_id, created.about)
-        return {"status": "created", "saved": True, "family": _summary(created),
+        set_active(created.profile_id, request_obj.request_id)
+        _sync_profile_file(created, request_obj.request_text)
+        logger.info("🌱 New profile %s created (about=%r)", created.profile_id, created.about)
+        return {"status": "created", "saved": True, "profile": _summary(created),
                 "about": created.about}
 
-    verdict = await classify_profile_change(family.profile_text, text)
+    verdict = await classify_profile_change(profile.profile_text, text)
 
     # ── cosmetic: edit in place ───────────────────────────────────────────
-    if not verdict.new_family_required:
-        family.profile_text = text
+    if not verdict.new_profile_required:
+        profile.profile_text = text
         if verdict.about:
-            family.about = verdict.about
-        store.save_family(family)
-        if current.get("family_id") == family.family_id:
-            _sync_profile_file(family, _active_request_text(family.family_id))
-        return {"status": "updated", "saved": True, "family": _summary(family)}
+            profile.about = verdict.about
+        store.save_profile(profile)
+        if current.get("profile_id") == profile.profile_id:
+            _sync_profile_file(profile, _active_request_text(profile.profile_id))
+        return {"status": "updated", "saved": True, "profile": _summary(profile)}
 
     # ── structural: a new profile with clean per-profile state ─────────────
-    created = store.create_family(
-        about=verdict.about or family.about, profile_text=text
+    created = store.create_profile(
+        about=verdict.about or profile.about, profile_text=text
     )
-    request_family = store.create_request_family(
-        created.family_id, _active_request_text(family.family_id)
+    request_obj = store.create_request(
+        created.profile_id, _active_request_text(profile.profile_id)
     )
-    set_active(created.family_id, request_family.request_family_id)
-    _sync_profile_file(created, request_family.request_text)
+    set_active(created.profile_id, request_obj.request_id)
+    _sync_profile_file(created, request_obj.request_text)
     logger.info(
         "🌿 %s: new profile %s (%s) — %s",
-        verdict.change, created.family_id, created.about, verdict.explanation,
+        verdict.change, created.profile_id, created.about, verdict.explanation,
     )
-    return {"status": "created", "saved": True, "family": _summary(created),
+    return {"status": "created", "saved": True, "profile": _summary(created),
             "change": verdict.change, "explanation": verdict.explanation}
 
 
 # ── request: classify, then apply ───────────────────────────────────────────
 @router.post("/request/classify")
 async def classify_request(payload: ClassifyRequestRequest):
-    if store.get_family(payload.family_id) is None:
-        raise HTTPException(404, "Family not found")
+    if store.get_profile(payload.profile_id) is None:
+        raise HTTPException(404, "Profile not found")
     current_text = ""
-    if payload.request_family_id:
-        existing = store.get_request_family(payload.request_family_id)
+    if payload.request_id:
+        existing = store.get_request(payload.request_id)
         current_text = existing.request_text if existing else ""
     verdict = await classify_request_change(current_text, payload.text)
     return {
         "change": verdict.change,
-        "new_family_required": verdict.new_family_required,
+        "new_profile_required": verdict.new_profile_required,
         "explanation": verdict.explanation,
     }
 
@@ -310,42 +320,42 @@ async def apply_request(payload: ApplyRequestRequest):
     """
     if not payload.accept:
         return {"status": "declined", "saved": False}
-    if store.get_family(payload.family_id) is None:
-        raise HTTPException(404, "Family not found")
+    if store.get_profile(payload.profile_id) is None:
+        raise HTTPException(404, "Profile not found")
 
-    from modules.families.active import read_active, set_active
+    from modules.profiles.active import read_active, set_active
 
     text = payload.text.strip()
     existing = (
-        store.get_request_family(payload.request_family_id) if payload.request_family_id else None
+        store.get_request(payload.request_id) if payload.request_id else None
     )
 
     if existing is None:
-        created = store.create_request_family(payload.family_id, text)
-        _mirror_if_active(payload.family_id, text, set_active, read_active)
+        created = store.create_request(payload.profile_id, text)
+        _mirror_if_active(payload.profile_id, text, set_active, read_active)
         return {"status": "created", "saved": True, "request": created.model_dump(mode="json")}
 
     verdict = await classify_request_change(existing.request_text, text)
-    if not verdict.new_family_required:
+    if not verdict.new_profile_required:
         existing.request_text = text
-        store.save_request_family(existing)
-        _mirror_if_active(payload.family_id, text, set_active, read_active)
+        store.save_request(existing)
+        _mirror_if_active(payload.profile_id, text, set_active, read_active)
         return {"status": "updated", "saved": True,
                 "request": existing.model_dump(mode="json"), "change": verdict.change}
 
-    created = store.create_request_family(payload.family_id, text)
-    set_active(payload.family_id, created.request_family_id)
-    _mirror_if_active(payload.family_id, text, set_active, read_active)
+    created = store.create_request(payload.profile_id, text)
+    set_active(payload.profile_id, created.request_id)
+    _mirror_if_active(payload.profile_id, text, set_active, read_active)
     logger.info(
         "🎯 Request %s: new request %s — %s",
-        verdict.change, created.request_family_id, verdict.explanation,
+        verdict.change, created.request_id, verdict.explanation,
     )
     return {"status": "created", "saved": True,
             "request": created.model_dump(mode="json"),
             "change": verdict.change, "explanation": verdict.explanation}
 
 
-def _mirror_if_active(family_id, request_text, set_active, read_active) -> None:
-    family = store.get_family(family_id)
-    if family and (read_active() or {}).get("family_id") == family_id:
-        _sync_profile_file(family, request_text)
+def _mirror_if_active(profile_id, request_text, set_active, read_active) -> None:
+    profile = store.get_profile(profile_id)
+    if profile and (read_active() or {}).get("profile_id") == profile_id:
+        _sync_profile_file(profile, request_text)

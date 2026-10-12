@@ -1,3 +1,4 @@
+import os
 import time
 import logging
 
@@ -272,7 +273,21 @@ class RedisStreamHandler:
 #   DB 2 — run state:    progress of long-running scrapes (resume support).
 #   DB 3 — keywords:     keyword cooldowns (TTL — keys expire themselves)
 #                        + persisted exclusion prompts.
+#
+# The DB numbers are overridable because the test suite needs a database of
+# its own. A dedicated category name is NOT isolation: keys like
+# tesserae:deferred:<profile_id>:<ad_id> are keyed by profile, so a test that
+# creates a profile writes real keys under a real-looking prefix and leaves
+# them behind. TESSERAE_REDIS_DB_OFFSET shifts all three, which gives the
+# suite a clean namespace it can flush without touching live state.
 
-verdict_broker = create_redis_connection(db=1)
-run_state_broker = create_redis_connection(db=2)
-keyword_broker = create_redis_connection(db=3)
+_REDIS_DB_OFFSET = int(os.getenv("TESSERAE_REDIS_DB_OFFSET", "0"))
+
+
+def _db(base: int) -> int:
+    return base + _REDIS_DB_OFFSET
+
+
+verdict_broker = create_redis_connection(db=_db(1))
+run_state_broker = create_redis_connection(db=_db(2))
+keyword_broker = create_redis_connection(db=_db(3))

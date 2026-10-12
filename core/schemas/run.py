@@ -43,8 +43,8 @@ class RunConfig(BaseModel):
     # it; accepted leads and universal junk are global.
     # None means "resolve the active profile at start".
     profile_id: str | None = None
-    # Which request family governs accept-vs-defer for this run.
-    request_family_id: str | None = None
+    # Which request profile governs accept-vs-defer for this run.
+    request_id: str | None = None
 
     # How many keywords to crawl at once. 1 = sequential (original behaviour).
     # Above 1 each worker gets its own page; higher means faster and a higher

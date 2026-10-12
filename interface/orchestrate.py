@@ -71,7 +71,7 @@ async def _run_with_filters(
     run_mode: str,
     run_id: str | None = None,
     profile_id: str | None = None,
-    request_family_id: str | None = None,
+    request_id: str | None = None,
     parallel_workers: int = 1,
 ) -> dict:
     """Run the orchestrator with the given filters and return the summary.
@@ -88,7 +88,7 @@ async def _run_with_filters(
             profile=profile,
             filters=filters,
             profile_id=profile_id,
-            request_family_id=request_family_id,
+            request_id=request_id,
             parallel_workers=parallel_workers,
         ),
         headless=False,
@@ -96,7 +96,7 @@ async def _run_with_filters(
         run_mode=run_mode,
         run_id=run_id,
         profile_id=profile_id,
-        request_family_id=request_family_id,
+        request_id=request_id,
     )
     return summary
 

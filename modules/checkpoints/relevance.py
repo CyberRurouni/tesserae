@@ -158,7 +158,7 @@ async def _judge_batch(
     intent: str,
     additional_filters: str | None = None,
     profile_text: str | None = None,
-    request_family_id: str | None = None,
+    request_id: str | None = None,
 ) -> dict[str, AdRelevanceVerdict]:
     """
     One Gemini call for up to BATCH_SIZE ads. Never raises: any failure defers
@@ -166,14 +166,14 @@ async def _judge_batch(
 
     Fail-closed means "deferred", not "rejected": a checkpoint failure must
     never throw away a lead the user might want. Deferred ads stay in the
-    family and are reconsidered later.
+    profile and are reconsidered later.
     """
     ids = [ad.ad_archive_id for ad in batch]
     listing = "\n\n".join(_format_ad(ad, i) for i, ad in enumerate(batch, start=1))
 
     sections = []
     if profile_text:
-        sections.append(f"ABOUT YOU (defines the family):\n{profile_text}")
+        sections.append(f"ABOUT YOU (defines the profile):\n{profile_text}")
     sections.append(f"CATEGORY / INTENT:\n{intent}")
     user_prompt = "\n\n".join(sections) + f"\n\n{len(batch)} ads to judge:\n\n{listing}"
     if additional_filters:
@@ -191,7 +191,7 @@ async def _judge_batch(
         return {
             ad_id: AdRelevanceVerdict(
                 ad_archive_id=ad_id, outcome="deferred", confidence=0.0,
-                reason=reason, request_family_id=request_family_id, ai_failed=True,
+                reason=reason, request_id=request_id, ai_failed=True,
             )
             for ad_id in ids
         }
@@ -230,7 +230,7 @@ async def _judge_batch(
             confidence=_normalize_confidence(row.get("confidence")),
             reason=str(row.get("reason", "")).strip(),
             ad_category=str(row.get("category", "")).strip(),
-            request_family_id=request_family_id,
+            request_id=request_id,
         )
 
     # Ads the model stayed silent about → deferred AND treated as a failure:
@@ -241,7 +241,7 @@ async def _judge_batch(
             verdicts[ad_id] = AdRelevanceVerdict(
                 ad_archive_id=ad_id, outcome="deferred", confidence=0.0,
                 reason="no verdict returned — will be retried",
-                request_family_id=request_family_id, ai_failed=True,
+                request_id=request_id, ai_failed=True,
             )
 
     tally = {o: sum(1 for v in verdicts.values() if v.outcome == o)
@@ -262,10 +262,10 @@ async def judge_ad_relevance(
     max_concurrent: int = MAX_CONCURRENT_BATCHES,
     additional_filters: str | None = None,
     profile_text: str | None = None,
-    request_family_id: str | None = None,
+    request_id: str | None = None,
 ) -> dict[str, AdRelevanceVerdict]:
     """
-    Checkpoint (a): judge every ad in two stages — against the family (about
+    Checkpoint (a): judge every ad in two stages — against the profile (about
     you), then against the current request. An explicit `intent` overrides the
     category description, for experiments.
 
@@ -309,7 +309,7 @@ async def judge_ad_relevance(
         async with gate:
             return await _judge_batch(
                 client, batch, batch_no, description, additional_filters,
-                profile_text, request_family_id,
+                profile_text, request_id,
             )
 
     results = await asyncio.gather(

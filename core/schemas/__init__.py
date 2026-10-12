@@ -27,12 +27,12 @@ from .coverage import (
     ExclusionPrompt,
 )
 from .run import UserProfile, TimeWindow, RunConfig
-from .family import (
+from .profile import (
     ChangeKind,
-    Family,
-    FamilyClassification,
+    Profile,
+    ProfileClassification,
     RequestClassification,
-    RequestFamily,
+    ProfileRequest,
 )
 
 __all__ = [
@@ -65,8 +65,8 @@ __all__ = [
     "TimeWindow",
     "RunConfig",
     "ChangeKind",
-    "Family",
-    "FamilyClassification",
+    "Profile",
+    "ProfileClassification",
     "RequestClassification",
-    "RequestFamily",
+    "ProfileRequest",
 ]

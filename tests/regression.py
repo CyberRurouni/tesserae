@@ -5,21 +5,31 @@ Self-contained: no pytest, no network, no browser. Run with:
 
     python3 tests/regression.py
 
-Every filesystem path is redirected by setting TESSERAE_DATA_DIR BEFORE the
-app is imported, so this can never touch the real data directory. Redis is
-shared, so everything here uses a dedicated category name.
+Two independent things are redirected, both before any app import:
+
+  * TESSERAE_DATA_DIR — every file the app reads or writes.
+  * TESSERAE_REDIS_DB_OFFSET — shifts all three Redis DBs, so this suite gets a
+    namespace of its own.
+
+The offset is not optional. Keys are shaped like
+tesserae:deferred:<profile_id>:<ad_id>, so a dedicated CATEGORY name gives no
+isolation at all — any test that creates a profile writes live keys under the
+real prefix and leaves them there. Flushing at the end is safe only because the
+databases belong to this run.
 """
 
 import asyncio
 import contextlib
+import json
 import os
 import sys
 import tempfile
 from pathlib import Path
 
-# Must happen before genesis.config is imported anywhere.
+# Must happen before genesis.config / redis_utils are imported anywhere.
 _SANDBOX = tempfile.mkdtemp(prefix="tesserae-regression-")
 os.environ["TESSERAE_DATA_DIR"] = _SANDBOX
+os.environ["TESSERAE_REDIS_DB_OFFSET"] = "12"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core import (  # noqa: E402
@@ -30,6 +40,7 @@ from core import (  # noqa: E402
     UserProfile,
 )
 import modules.verdicts as V  # noqa: E402
+from modules.profiles.deferred import defer_ad  # noqa: E402
 from modules.verdicts import FilterIndex  # noqa: E402
 
 CATEGORY = "regression_test"
@@ -79,7 +90,15 @@ def test_sets():
     print("\n[3] JSON mirrors survive a Redis flush")
     import redis
 
-    r = redis.Redis(host="localhost", port=6379, db=2, decode_responses=True)
+    # Use the broker's own database rather than hardcoding one: the suite runs
+    # on an offset DB, and connecting to the live one to "test a flush" would
+    # delete the user's accepted and junk sets.
+    from core.utils.redis_utils import run_state_broker
+
+    db = run_state_broker.connection_pool.connection_kwargs["db"]
+    r = redis.Redis(host="localhost", port=6379, db=db, decode_responses=True)
+    check("the flush targets a test database, not a live one", db >= 10, f"db={db}")
+
     cleared = 0
     for key in r.scan_iter(match=f"tesserae:*:{CATEGORY}"):
         cleared += r.delete(key)
@@ -101,11 +120,11 @@ def test_record_routing():
     verdicts = {
         "n_1": v("n_1", "rejected", "no_hiring"),
         "n_2": v("n_2", "rejected", "not_for_me"),
-        "n_3": v("n_3", "deferred", request_family_id="req_1"),
+        "n_3": v("n_3", "deferred", request_id="req_1"),
         "n_4": v("n_4", "accepted"),
     }
     R.record_results(ads, verdicts, CATEGORY, None, run_id="run_R",
-                     searched_keywords=["kw"], profile_id=PROFILE, request_family_id="req_1")
+                     searched_keywords=["kw"], profile_id=PROFILE, request_id="req_1")
     check("no_hiring -> junk", V.is_junk(CATEGORY, "n_1"))
     check("not_for_me -> not junk", not V.is_junk(CATEGORY, "n_2"))
     check("not_for_me -> this profile only", V.is_rejected(PROFILE, "n_2"))
@@ -177,7 +196,7 @@ def test_judge():
         ads = [AdRecord(ad_archive_id=i, source_keyword="kw", ad_text="t") for i in
                ("j_1", "j_2", "j_3", "j_4", "j_5")]
         out = asyncio.run(rel.judge_ad_relevance(ads, intent="jobs", additional_filters="r",
-                                                 profile_text="p", request_family_id="req_1"))
+                                                 profile_text="p", request_id="req_1"))
         check("no_hiring parsed", out["j_1"].rejection_kind == "no_hiring")
         check("not_for_me parsed", out["j_2"].rejection_kind == "not_for_me")
         check("accepted", out["j_4"].outcome == "accepted")
@@ -279,7 +298,7 @@ def test_cycles():
         yield object()
 
     async def scrape(filters, headless=False, context=None, run_seen_ids=None,
-                     profile_id=None, request_family_id=None, parallel_workers=1):
+                     profile_id=None, request_id=None, parallel_workers=1):
         calls["searches"].append(list(filters.keywords))
         return []
 
@@ -361,6 +380,100 @@ def test_cycles():
             setattr(om, n, f)
 
 
+# ── 8. user corrections ─────────────────────────────────────────────────────
+def test_corrections():
+    print("\n[13] a wrong verdict is undoable, and stays in one bucket")
+    import modules.verdicts as vv
+
+    cat = "regression_corrections"
+    prof, other = "prof_corr", "prof_corr_other"
+
+    # Assigning must clear the other sets. The filter checks accepted first, so
+    # an id left in two sets would keep the first answer and ignore the edit.
+    vv.set_verdict(cat, prof, "X1", "junk")
+    check("junk only", vv.is_junk(cat, "X1") and not vv.is_accepted(cat, "X1"))
+    vv.set_verdict(cat, prof, "X1", "accepted")
+    check("accepted only after re-assign",
+          vv.is_accepted(cat, "X1") and not vv.is_junk(cat, "X1"))
+    vv.set_verdict(cat, prof, "X1", "rejected")
+    check("rejected only after re-assign",
+          not vv.is_accepted(cat, "X1") and "X1" in vv.rejected_ids(prof))
+    check("rejection is profile-scoped", "X1" not in vv.rejected_ids(other))
+    check("accepted/junk are global", not vv.is_accepted(cat, "X1"))
+
+    # Deleting must survive a cold Redis mirror: JSON is the truth.
+    vv.set_verdict(cat, prof, "X1", "junk")
+    check("junk again", vv.is_junk(cat, "X1"))
+    vv.forget_junk(cat, ["X1"])
+    check("forget removes it", not vv.is_junk(cat, "X1"))
+    check("forget survives Redis loss",
+          not ("X1" in {i for i in V._load_mirror(f'junk_{cat}')}))
+
+    # Move: copy-then-delete, never widening. An interrupted move must leave the
+    # ids under the old profile (inert), not half-applied.
+    vv.set_verdict(cat, prof, "M1", "rejected")
+    moved = vv.move_rejected(prof, other, ["M1"])
+    check("moved the right count", moved == 1, str(moved))
+    check("no longer under the old profile", "M1" not in vv.rejected_ids(prof))
+    check("now under the new profile", "M1" in vv.rejected_ids(other))
+    check("moving to the same profile is a no-op", vv.move_rejected(other, other, ["M1"]) == 0)
+
+    # rejected is the only scoped verdict — assigning it without a profile is
+    # an error, not a silent no-op.
+    try:
+        vv.set_verdict(cat, None, "X2", "rejected")
+        check("rejected without a profile is refused", False)
+    except ValueError:
+        check("rejected without a profile is refused", True)
+    try:
+        vv.set_verdict(cat, prof, "X2", "nonsense")
+        check("unknown outcome is refused", False)
+    except ValueError:
+        check("unknown outcome is refused", True)
+
+
+# ── 9. the active pointer binds a request ───────────────────────────────────
+def test_active_pointer():
+    print("\n[12] an unbound pointer is repaired, and runs never judge blind")
+    from modules.profiles import active as act, store as fstore
+
+    profile = fstore.create_profile(about="Regression Pointer", profile_text="p")
+    request = fstore.create_request(profile.profile_id, "r")
+
+    # A pointer written before requests existed, on a single-request profile.
+    act.set_active(profile.profile_id, None)
+    check("sole request is linked", act.active_request_id() == request.request_id)
+    check("repair is written to disk",
+          json.loads(act.ACTIVE_FILE.read_text())["request_id"] == request.request_id)
+
+    # A known-good pointer is never second-guessed.
+    act.set_active(profile.profile_id, request.request_id)
+    check("valid pointer survives", act.active_request_id() == request.request_id)
+
+    # The run path must fall back to the active request, or the deferred
+    # bucket goes unread and parked ads get judged again on every run.
+    cat = "career_jobs_regression_ptr"
+    defer_ad(profile.profile_id, {"ad_archive_id": "PARKED"}, request.request_id)
+    bound = FilterIndex(cat, profile.profile_id, act.active_request_id()).load()
+    check("a bound request keeps parked ads parked", bound.check("PARKED")[0] is True,
+          str(bound.check("PARKED")))
+    blind = FilterIndex(cat, profile.profile_id, None).load()
+    check("which is why an unbound run would re-judge them", blind.check("PARKED")[0] is False)
+
+    # Two requests: the answer is ambiguous, so nothing is guessed.
+    fstore.create_request(profile.profile_id, "r2")
+    act.set_active(profile.profile_id, None)
+    check("ambiguous pointer is left alone", act.active_request_id() is None)
+
+    # A request belonging to another profile must not be honoured — it would
+    # judge this profile's ads against someone else's request text.
+    stranger = fstore.create_request(
+        fstore.create_profile(about="Regression Stranger", profile_text="s").profile_id, "x")
+    act.set_active(profile.profile_id, stranger.request_id)
+    check("cross-profile request is rejected",
+          act.active_request_id() != stranger.request_id)
+
+
 def main():
     print("═" * 62)
     print("  Tesserae regression — sandbox:", _SANDBOX)
@@ -371,12 +484,34 @@ def main():
     test_judge()
     test_scraper()
     test_cycles()
+    test_corrections()
+    test_active_pointer()
+
+    # Leave nothing behind. Safe because TESSERAE_REDIS_DB_OFFSET moved these
+    # databases off the ones the app uses.
+    _flush_test_redis()
+
     print("\n" + "═" * 62)
     if _fails:
         print(f"  {len(_fails)} FAILED: {_fails}")
         return 1
     print(f"  ALL PASS ({_passed} checks)")
     return 0
+
+
+def _flush_test_redis() -> None:
+    """Empty the suite's own Redis databases. Never touches live ones."""
+    try:
+        from core.utils.redis_utils import keyword_broker, run_state_broker, verdict_broker
+
+        flushed = 0
+        for broker in (verdict_broker, run_state_broker, keyword_broker):
+            if broker.connection_pool.connection_kwargs.get("db", 0) < 10:
+                continue  # would be a live database — refuse rather than risk it
+            flushed += broker.flushdb()
+        print(f"  🧹 Flushed {flushed} test database(s)")
+    except Exception as exc:  # noqa: BLE001 - cleanup must not mask a failure
+        print(f"  ⚠️  Could not flush test Redis: {exc}")
 
 
 if __name__ == "__main__":

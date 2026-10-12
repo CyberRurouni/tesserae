@@ -1,20 +1,19 @@
 """
 classifier.py — the only place a model is allowed to judge an edit.
 
-Three separate calls, deliberately not one:
+Two separate calls, deliberately not one:
 
   classify_profile_change — is this edit cosmetic, narrowing, or widening?
-                             Also places the family in the fixed taxonomy.
   classify_request_change  — same question, for the additional request.
-  check_scope              — is this ad inside this family's chain? Bare yes/no.
-
-check_scope is kept apart from the others on purpose. It decides whether an
-inherited verdict carries into a new node, so it runs at temperature 0 against
-a closed vocabulary and is never allowed to be creative. Folding it into the
-editing calls would let a confident-sounding guess quietly drop real leads.
 
 Nothing here writes. Classification is a proposal; the caller confirms, then
 the store is updated. That is what lets a user decline without side effects.
+
+This module used to place each profile in a fixed taxonomy so related profiles
+could be discovered and share verdicts. That is gone — accepted and junk are
+global and rejections are per-profile, so there is nothing left to discover —
+and with it went the taxonomy validation. The dead check was still calling it,
+which would have raised NameError on the first profile edit.
 """
 
 import json
@@ -22,8 +21,8 @@ import logging
 
 from core import (
     AIClient,
-    Family,
-    FamilyClassification,
+    Profile,
+    ProfileClassification,
     RequestClassification,
 )
 
@@ -40,18 +39,18 @@ def _json_hint(shape: str) -> str:
 # 🔹 PROFILE EDIT — cosmetic / narrowing / widening + taxonomy placement
 # ============================================================================
 _PROFILE_SYSTEM = f"""\
-You maintain FAMILIES for a job lead-generation system.
+You maintain PROFILES for a job lead-generation system.
 
-A FAMILY is one declared professional objective with a fixed acceptable set of
-ads. "Python developer" and "Backend developer" are DIFFERENT families even
+A PROFILE is one declared professional objective with a fixed acceptable set of
+ads. "Python developer" and "Backend developer" are DIFFERENT profiles even
 though both are backend work, because Python rejects Node.js ads and Backend
 does not.
 
-Compare the CURRENT family text against the EDITED text and decide what kind
+Compare the CURRENT profile text against the EDITED text and decide what kind
 of edit this is:
 
   "none"      — the acceptable set of ads is UNCHANGED. Only wording got
-                better or more explicit. Stays in the same family.
+                better or more explicit. Stays in the same profile.
   "narrowing" — the new text accepts a SUBSET of what the old one accepted.
   "widening"  — the new text accepts a SUPERSET.
 
@@ -61,26 +60,26 @@ have REJECTED, or stop accepting ads it would have taken?
   - accepts fewer -> "narrowing"
   - same ads      -> "none"
 
-Critical nuance, do not get this wrong. Adding a technology that the family was
+Critical nuance, do not get this wrong. Adding a technology that the profile was
 ALREADY open to is NOT a widening:
   - "backend developer, expertise in python" -> "backend developer, expertise in
-    python and node js"  = "none". A backend family was already open to Node.js.
+    python and node js"  = "none". A backend profile was already open to Node.js.
   - "python developer" -> "python and node js developer" = "widening". The Python
-    family rejected Node.js ads; naming Node.js admits ads whose fate was already
+    profile rejected Node.js ads; naming Node.js admits ads whose fate was already
     sealed. That is the destructive direction, and it needs a new node.
 
-Also assign "about": what this family is ABOUT, in a few words ("Python
-backend developer"). Distinct families have distinct about values.
+Also assign "about": what this profile is ABOUT, in a few words ("Python
+backend developer"). Distinct profiles have distinct about values.
 
-new_family_required is true for "narrowing" and "widening", false for "none".
+new_profile_required is true for "narrowing" and "widening", false for "none".
 
-{_json_hint('{"change": "none|narrowing|widening", "new_family_required": true|false, '
+{_json_hint('{"change": "none|narrowing|widening", "new_profile_required": true|false, '
             '"about": "<max 4 words>", '
             '"explanation": "<max 40 words, plain English, shown to the user when a new profile is proposed>"}')}
 """
 
 
-async def classify_profile_change(current_text: str, edited_text: str) -> FamilyClassification:
+async def classify_profile_change(current_text: str, edited_text: str) -> ProfileClassification:
     client = AIClient()
     raw = await client.blocking(
         [
@@ -88,7 +87,7 @@ async def classify_profile_change(current_text: str, edited_text: str) -> Family
             {
                 "role": "user",
                 "content": (
-                    f"CURRENT FAMILY TEXT:\n{current_text or '(empty — new family)'}\n\n"
+                    f"CURRENT PROFILE TEXT:\n{current_text or '(empty — new profile)'}\n\n"
                     f"EDITED TEXT:\n{edited_text or '(empty)'}"
                 ),
             },
@@ -97,27 +96,15 @@ async def classify_profile_change(current_text: str, edited_text: str) -> Family
         temperature=0.0,  # a classification, not a creative act
     )
 
-    result = FamilyClassification(
+    result = ProfileClassification(
         change=raw.get("change") or "none",
-        new_family_required=bool(raw.get("new_family_required")),
+        new_profile_required=bool(raw.get("new_profile_required")),
         about=str(raw.get("about") or "").strip(),
         explanation=str(raw.get("explanation") or "").strip(),
     )
-
-    if not taxonomy.is_valid(domain, specs):
-        # An off-taxonomy level would break related-family discovery, so the
-        # SCOPE is discarded. The `about` label is independent and often
-        # perfectly good, so it is kept — dropping it would lose a useful name
-        # over a taxonomy nit.
-        logger.warning(
-            "⚠️ Classifier proposed off-taxonomy scope %r/%r — keeping the name, dropping the scope",
-            domain, specs,
-        )
-        result.category_domain, result.specialisations = "", []
     logger.info(
-        "🧬 Profile edit: %s (new node: %s) — about=%r %s/%s",
-        result.change, result.new_family_required, result.about,
-        result.category_domain, result.specialisations,
+        "🧬 Profile edit: %s (new profile required: %s) — about=%r",
+        result.change, result.new_profile_required, result.about,
     )
     return result
 
@@ -126,7 +113,7 @@ async def classify_profile_change(current_text: str, edited_text: str) -> Family
 # 🔹 REQUEST EDIT — cosmetic / narrowing / widening
 # ============================================================================
 _REQUEST_SYSTEM = f"""\
-You maintain REQUEST FAMILIES for a job lead-generation system.
+You maintain REQUESTS for a job lead-generation system.
 
 A REQUEST says what the user wants RIGHT NOW. It never changes who they are —
 only which in-scope ads are wanted at this moment versus held for later.
@@ -148,9 +135,9 @@ Being more specific is NOT necessarily a narrowing. "Python roles" ->
 same set. Judge the ACCEPTED AD SET, not the wording or the strictness of tone.
 Adding a genuine constraint that excludes ads IS a narrowing.
 
-new_family_required is true for "narrowing" and "widening", false for "none".
+new_profile_required is true for "narrowing" and "widening", false for "none".
 
-{_json_hint('{"change": "none|narrowing|widening", "new_family_required": true|false, '
+{_json_hint('{"change": "none|narrowing|widening", "new_profile_required": true|false, '
             '"explanation": "<max 40 words, plain English>"}')}
 """
 
@@ -173,12 +160,12 @@ async def classify_request_change(current_text: str, edited_text: str) -> Reques
     )
     result = RequestClassification(
         change=raw.get("change") or "none",
-        new_family_required=bool(raw.get("new_family_required")),
+        new_profile_required=bool(raw.get("new_profile_required")),
         explanation=str(raw.get("explanation") or "").strip(),
     )
     logger.info(
         "🎯 Request edit: %s (new node: %s) — %s",
-        result.change, result.new_family_required, result.explanation,
+        result.change, result.new_profile_required, result.explanation,
     )
     return result
 

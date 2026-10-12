@@ -9,7 +9,9 @@ const LINKS = [
   { href: '/about', label: 'About you' },
   { href: '/looking-for', label: 'Looking for' },
   { href: '/config', label: 'Search' },
+  { href: '/heuristics', label: 'Heuristics' },
   { href: '/runs', label: 'Runs' },
+  { href: '/verdicts', label: 'Decisions' },
 ];
 
 export function Nav() {

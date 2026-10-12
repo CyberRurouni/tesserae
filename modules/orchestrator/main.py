@@ -85,7 +85,7 @@ async def run_orchestrator(
     run_mode: str = "generate",  # "existing" or "generate"
     run_id: str | None = None,
     profile_id: str | None = None,
-    request_family_id: str | None = None,
+    request_id: str | None = None,
 ) -> dict:
     """
     Run the keyword lifecycle.
@@ -97,13 +97,13 @@ async def run_orchestrator(
         searched exactly once, ever). max_cycles bounds COMPLETED cycles.
     run_id: name of the single result file this run writes (see record_results).
     """
-    if request_family_id and not config.request_family_id:
-        config = config.model_copy(update={"request_family_id": request_family_id})
+    if request_id and not config.request_id:
+        config = config.model_copy(update={"request_id": request_id})
 
     category_id = config.filters.category
     about, additional_filters = _load_texts()
     logger.info(
-        "🚀 Orchestrator start — category %r, pool limit %d, mode=%s, family=%s",
+        "🚀 Orchestrator start — category %r, pool limit %d, mode=%s, profile=%s",
         category_id, config.keyword_pool_limit, run_mode, config.profile_id or "(no profile)",
     )
 
@@ -313,11 +313,11 @@ async def _search_and_judge(
         max_concurrent=config.judge_max_concurrent,
         additional_filters=additional_filters or None,
         # The judge reasons in two stages and needs BOTH: about-you defines the
-        # family (accept vs reject), the additional request only decides
+        # profile (accept vs reject), the additional request only decides
         # accept vs defer. Without about-you every off-request ad would look
         # like trash instead of something worth keeping.
         profile_text=config.profile.background,
-        request_family_id=config.request_family_id,
+        request_id=config.request_id,
         parallel_workers=config.parallel_workers,
     )
     summary = record_results(

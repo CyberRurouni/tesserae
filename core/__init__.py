@@ -77,10 +77,10 @@ from .schemas import (
     TimeWindow,
     RunConfig,
     ChangeKind,
-    Family,
-    FamilyClassification,
+    Profile,
+    ProfileClassification,
     RequestClassification,
-    RequestFamily,
+    ProfileRequest,
 )
 
 # ----------

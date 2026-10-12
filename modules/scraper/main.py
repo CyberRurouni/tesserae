@@ -11,15 +11,7 @@ import logging
 
 from playwright.async_api import BrowserContext, Page
 
-from core import (
-    AdRecord,
-    CATEGORIES,
-    ScrapingFilters,
-    safe_redis_operation,
-    verdict_broker,
-    compute_profile_hashes,
-    PROFILE_HASH_TTL,
-)
+from core import AdRecord, CATEGORIES, ScrapingFilters
 
 
 from .browser import browser_session
@@ -46,24 +38,15 @@ def renew_deferral(profile_id: str | None, ad_id: str) -> bool:
     A deferred ad met again under the SAME request is not re-judged — the
     request has not changed, so nothing about it has changed. Renewing here is
     what keeps it alive in the not-now bucket instead of quietly ageing out.
-    Imported lazily so the scraper city does not depend on the family package
+    Imported lazily so the scraper city does not depend on the profile package
     at import time.
     """
     if not profile_id:
         return False
-    from modules.families.deferred import renew
+    from modules.profiles.deferred import renew
 
     return renew(profile_id, ad_id)
 
-# Verdict key pattern in Redis DB 1 — first writer wins, and the key is
-# CATEGORY+PROFILE-SCOPED: a verdict is about an ad UNDER A LENS + PROFILE,
-# so profile changes automatically get a fresh key space.
-#   seen_ad = a FINAL verdict was reached (accepted OR judged-rejected):
-#             never processed again IN THIS CATEGORY+PROFILE. AI-failure ads
-#             stay unmarked on purpose, so they flow through and get
-#             re-judged next run — the pass-through lives in WHAT gets
-#             marked, not in an extra filter condition.
-SEEN_AD_KEY = "tesserae:seen_ad:{category}:{about_hash}:{filter_hash}:{ad_id}"
 
 # Scroll+extract loop tuning, driven by Meta's own '~N results' estimate:
 #   - target_unique  = 80% of the estimate — the safety margin. The list
@@ -95,36 +78,6 @@ def _scroll_budget(estimate: int | None) -> int:
         return 15
     return max(10, min(120, int(HARD_STEP_CAP_MULTIPLIER * estimate / CARDS_PER_STEP_GUESS)))
 
-
-def already_fetched(ad_id: str, category: str, filters: ScrapingFilters | None = None) -> bool:
-    """
-    True if this ad has a FINAL verdict under this category+profile from a
-    previous run. Marks are written only AFTER the AI checkpoint reaches
-    a verdict (accepted, or model-judged-rejected) — ads lost to AI
-    failure stay unmarked and get another chance next run.
-
-    Profile hashes are included in the key, so profile changes automatically
-    get a fresh key space (old verdicts don't block re-evaluation).
-    """
-    about_hash, filter_hash = compute_profile_hashes()
-    key = SEEN_AD_KEY.format(category=category, about_hash=about_hash, filter_hash=filter_hash, ad_id=ad_id)
-    return safe_redis_operation(verdict_broker.exists, key) == 1
-
-
-def mark_fetched(ad_id: str, category: str, filters: ScrapingFilters | None = None) -> None:
-    """
-    Record an ad id as VERDICT-REACHED under this category+profile — called
-    only after checkpoint (a) has judged the ad (accepted, or
-    model-judged-rejected), never for a mere heuristic survivor.
-    AI-failure ads are deliberately left unmarked so a future run
-    re-judges them.
-
-    Key includes profile hashes and TTL, so profile changes get fresh space
-    and old keys auto-expire after 90 days.
-    """
-    about_hash, filter_hash = compute_profile_hashes()
-    key = SEEN_AD_KEY.format(category=category, about_hash=about_hash, filter_hash=filter_hash, ad_id=ad_id)
-    safe_redis_operation(verdict_broker.set, key, 1, ex=PROFILE_HASH_TTL)
 
 
 def passes_heuristics(
@@ -175,7 +128,7 @@ async def run_scrape(
     context: BrowserContext | None = None,
     run_seen_ids: RunSeenIds | None = None,
     profile_id: str | None = None,
-    request_family_id: str | None = None,
+    request_id: str | None = None,
     parallel_workers: int = 1,
 ) -> list[AdRecord]:
     """
@@ -211,20 +164,20 @@ async def run_scrape(
         logger.info("🔎 Category lens: %s — %s", category.label, cat_id)
 
     run_seen = run_seen_ids or RunSeenIds()
-    # In-memory mirror of this family's verdicts (plus its ancestors'), loaded
-    # once instead of one Redis round trip per scraped card. With no family the
+    # In-memory mirror of this profile's verdicts (plus its ancestors'), loaded
+    # once instead of one Redis round trip per scraped card. With no profile the
     # mirror is empty, which degrades to within-pass dedup only.
-    filter_index = get_filter_index(cat_id, profile_id, request_family_id).load()
+    filter_index = get_filter_index(cat_id, profile_id, request_id).load()
     if profile_id is None:
         logger.warning("⚠️ No profile for this run — only global dedup is active")
 
     if context is not None:
         return await _scrape_on(context, filters, category, cat_id, run_seen,
-                                 filter_index, profile_id, request_family_id,
+                                 filter_index, profile_id, request_id,
                                  parallel_workers)
     async with browser_session(headless=headless) as owned:
         return await _scrape_on(owned, filters, category, cat_id, run_seen,
-                                filter_index, profile_id, request_family_id,
+                                filter_index, profile_id, request_id,
                                 parallel_workers)
 
 
@@ -237,7 +190,7 @@ async def _scrape_keyword(
     run_seen: RunSeenIds,
     filter_index,
     profile_id: str | None,
-    request_family_id: str | None,
+    request_id: str | None,
     seen_ids: set[str],
     extract_lock: asyncio.Lock,
     is_first_keyword: bool,
@@ -410,7 +363,7 @@ async def _scrape_on(
     run_seen: RunSeenIds,
     filter_index=None,
     profile_id: str | None = None,
-    request_family_id: str | None = None,
+    request_id: str | None = None,
     parallel_workers: int = 1,
 ) -> list[AdRecord]:
     """
@@ -442,7 +395,7 @@ async def _scrape_on(
             for idx, keyword in enumerate(keywords):
                 fresh.extend(await _scrape_keyword(
                     page, keyword, filters, category, cat_id, run_seen, filter_index,
-                    profile_id, request_family_id, seen_ids, extract_lock,
+                    profile_id, request_id, seen_ids, extract_lock,
                     is_first_keyword=(idx == 0),
                 ))
         finally:
@@ -466,7 +419,7 @@ async def _scrape_on(
                 try:
                     out.extend(await _scrape_keyword(
                         pages[idx], keyword, filters, category, cat_id, run_seen,
-                        filter_index, profile_id, request_family_id, seen_ids,
+                        filter_index, profile_id, request_id, seen_ids,
                         extract_lock, is_first_keyword=(idx == 0 and j == 0),
                         worker_label=label,
                     ))

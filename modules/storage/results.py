@@ -15,8 +15,8 @@ from datetime import datetime, timezone
 
 from core import ADS_DIR, AdRelevanceVerdict, AdRecord, PROFILE_HASH_TTL
 
-from modules.families import deferred as deferred_store
-from modules.families import store as family_store
+from modules.profiles import deferred as deferred_store
+from modules.profiles import store as profile_store
 from modules.verdicts import (
     FilterIndex as get_filter_index,
     record_accepted,
@@ -49,7 +49,7 @@ def record_results(
     run_id: str | None = None,
     searched_keywords: list[str] | None = None,
     profile_id: str | None = None,
-    request_family_id: str | None = None,
+    request_id: str | None = None,
 ) -> dict:
     """
     Apply verdicts: mark + store + write the run files under
@@ -94,7 +94,7 @@ def record_results(
     # not_for_me rejection in the global junk set would discard a lead another
     # profile would have valued, so the two are kept strictly apart.
     newly_marked = 0
-    filter_index = get_filter_index(category_id, profile_id, request_family_id)
+    filter_index = get_filter_index(category_id, profile_id, request_id)
     accepted_ids, junk_ids, rejected_ids = [], [], []
 
     for ad in ads:
@@ -127,23 +127,23 @@ def record_results(
     cat_dir = ADS_DIR / category_id
     cat_dir.mkdir(parents=True, exist_ok=True)
 
-    # Accepted ads go to the family's LEAD LIST: deduped, never pruned, and
+    # Accepted ads go to the profile's LEAD LIST: deduped, never pruned, and
     # mirrored to JSON so a row can never be lost to a Redis flush. This
     # replaces the old append-only store, which had grown to 47 rows for 26
     # unique ads because nothing ever checked.
     if profile_id and accepted:
-        added = family_store.add_leads(
+        added = profile_store.add_leads(
             profile_id, [ad.model_dump(mode="json") for ad in accepted]
         )
         if added:
             logger.info("📥 Lead list for %s: %d new lead(s)", profile_id, added)
 
-    # Deferred ads keep their FULL record so a later request family can
+    # Deferred ads keep their FULL record so a later request profile can
     # re-judge them without re-scraping.
     if profile_id:
         for entry in deferred:
             deferred_store.defer_ad(
-                profile_id, entry, request_family_id or "",
+                profile_id, entry, request_id or "",
                 reason=entry.get("relevance_reason", ""),
                 ad_category=entry.get("ad_category", ""),
             )

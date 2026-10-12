@@ -23,9 +23,11 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
-from interface.families_api import router as families_router
+from interface.profiles_api import router as profiles_router
+from interface.heuristics_api import router as heuristics_router
 from interface.orchestrate import _run_with_filters
 from interface.select_filters import build_scraping_filters
+from interface.verdicts_api import router as verdicts_router
 
 logger = logging.getLogger(__name__)
 
@@ -68,10 +70,10 @@ class RunRequest(BaseModel):
     cycles: Optional[int] = None
     run_until_complete: bool = False
     heuristic_patterns: Optional[dict[str, list[str]]] = None
-    # Which family to run under. Omitted => the active family, which is what
+    # Which profile to run under. Omitted => the active profile, which is what
     # the current one-page config UI implies.
     profile_id: Optional[str] = None
-    request_family_id: Optional[str] = None
+    request_id: Optional[str] = None
     # Keywords crawled at once. 1 keeps the original sequential behaviour;
     # raise it for speed at the cost of captcha exposure.
     parallel_workers: int = 1
@@ -158,10 +160,20 @@ def _build_filters(request: RunRequest):
     if any(region.upper() == "ALL" for region in regions):
         regions = ["ALL"]
 
-    heuristics = request.heuristic_patterns or {
-        "require_ad_text_patterns": [],
-        "require_any_ad_text_patterns": [],
-        "exclude_ad_text_patterns": [],
+    # The user's own sieve patterns join the category's built-ins for the run.
+    # An explicit request may still add to these; neither replaces the other.
+    from core.schemas.category import CATEGORIES, DEFAULT_CATEGORY_ID
+    from modules import heuristics as heuristics_store
+
+    category_heuristics = CATEGORIES.get(
+        request.category, CATEGORIES[DEFAULT_CATEGORY_ID]
+    ).heuristics.model_dump()
+    base = heuristics_store.combined_for_run(category_heuristics)
+
+    supplied = request.heuristic_patterns or {}
+    heuristics = {
+        field: sorted({*base.get(field, []), *supplied.get(field, [])})
+        for field in heuristics_store.FIELDS
     }
 
     return build_scraping_filters(
@@ -187,7 +199,9 @@ def _keyword_targets(request: RunRequest) -> int:
     return max(1, request.cycles or 1)
 
 
-app.include_router(families_router)
+app.include_router(profiles_router)
+app.include_router(verdicts_router)
+app.include_router(heuristics_router)
 
 
 # ── Run lifecycle ──────────────────────────────────────────────────────────
@@ -211,17 +225,24 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
         # Resolve the profile before the orchestrator so the run state reports
         # which lens it ran under. Accepted leads and universal junk are global
         # and need no profile; only this profile's own rejections do.
-        from modules.families.active import ensure_active_family
+        from modules.profiles.active import active_request_id, ensure_active_profile
 
-        profile = await ensure_active_family()
+        profile = await ensure_active_profile()
         if not request.profile_id:
-            request = request.model_copy(update={"profile_id": profile.family_id})
-        state["profile_id"] = profile.family_id
+            request = request.model_copy(update={"profile_id": profile.profile_id})
+        # The search UI has no request picker, so a run arrives without one. Fall
+        # back to the active request — without it the deferred bucket is skipped
+        # and every parked ad gets judged again on the next run.
+        if not request.request_id:
+            active_request = active_request_id()
+            if active_request:
+                request = request.model_copy(update={"request_id": active_request})
+        state["profile_id"] = profile.profile_id
         state["profile_about"] = profile.about
 
         logger.info(
             "Run %s starting with %d keyword(s), mode=%s, profile=%s",
-            run_id, len(filters.keywords), request.run_mode, profile.family_id,
+            run_id, len(filters.keywords), request.run_mode, profile.profile_id,
         )
 
         summary = await _run_with_filters(
@@ -230,7 +251,7 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
             request.run_mode,
             run_id,
             request.profile_id,
-            request.request_family_id,
+            request.request_id,
             max(1, min(int(request.parallel_workers or 1), 3)),
         )
 

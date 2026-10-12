@@ -23,7 +23,7 @@ function ChangeBanner({ verdict, busy }) {
   }
   if (!verdict) return null;
 
-  if (!verdict.new_family_required) {
+  if (!verdict.new_profile_required) {
     return (
       <div className="rounded-xl border border-success/40 bg-success/10 px-4 py-3 text-sm">
         <p className="font-semibold text-foreground">Stays inside this profile</p>
@@ -80,12 +80,12 @@ export default function AboutClient() {
   const timer = useRef(null);
 
   const load = useCallback(async () => {
-    const res = await fetch('/api/families', { cache: 'no-store' });
+    const res = await fetch('/api/profiles', { cache: 'no-store' });
     const body = await res.json();
     setData(body);
     setSelectedId((prev) => {
-      if (prev && body.families.some((f) => f.family_id === prev)) return prev;
-      return body.active_family_id || body.families[0]?.family_id || null;
+      if (prev && body.profiles.some((f) => f.profile_id === prev)) return prev;
+      return body.active_profile_id || body.profiles[0]?.profile_id || null;
     });
   }, []);
 
@@ -93,8 +93,8 @@ export default function AboutClient() {
     load().catch(() => setMessage({ tone: 'error', text: 'Could not load your profiles.' }));
   }, [load]);
 
-  const families = data?.families ?? [];
-  const selected = families.find((f) => f.family_id === selectedId) ?? null;
+  const profiles = data?.profiles ?? [];
+  const selected = profiles.find((f) => f.profile_id === selectedId) ?? null;
 
   // Load the editor whenever the selection changes.
   useEffect(() => {
@@ -102,11 +102,11 @@ export default function AboutClient() {
     setDraft(selected.profile_text);
     setDirty(false);
     setVerdict(null);
-    fetch(`/api/families/${selected.family_id}/leads`, { cache: 'no-store' })
+    fetch(`/api/profiles/${selected.profile_id}/leads`, { cache: 'no-store' })
       .then((r) => r.json())
       .then((b) => setLeads(b.leads ?? []))
       .catch(() => setLeads([]));
-  }, [selectedId, selected?.family_id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedId, selected?.profile_id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Debounced classification of whatever is currently typed.
   useEffect(() => {
@@ -118,10 +118,10 @@ export default function AboutClient() {
     clearTimeout(timer.current);
     timer.current = setTimeout(async () => {
       try {
-        const res = await fetch('/api/families/profile/classify', {
+        const res = await fetch('/api/profiles/profile/classify', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text: draft, family_id: selectedId }),
+          body: JSON.stringify({ text: draft, profile_id: selectedId }),
         });
         if (res.ok) setVerdict(await res.json());
       } catch {
@@ -144,12 +144,12 @@ const save = async (accept = true) => {
     setMessage(null);
     const wasNewProfile = !selectedId;
     try {
-      const res = await fetch('/api/families/profile/apply', {
+      const res = await fetch('/api/profiles/profile/apply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           text: draft,
-          family_id: selectedId,
+          profile_id: selectedId,
           accept,
           about: verdict?.about,
         }),
@@ -168,15 +168,15 @@ const save = async (accept = true) => {
       // a first profile, a node forked by a structural change, or an edit.
       let text;
       if (wasNewProfile) {
-        text = `Profile created: ${body.family?.about ?? 'untitled'}.`;
+        text = `Profile created: ${body.profile?.about ?? 'untitled'}.`;
       } else if (body.status === 'created') {
-        text = `New profile created: ${body.family?.about ?? 'untitled'}.`;
+        text = `New profile created: ${body.profile?.about ?? 'untitled'}.`;
       } else {
         text = 'Profile updated.';
       }
       setMessage({ tone: 'success', text });
       await load();
-      setSelectedId(body.family?.family_id ?? selectedId);
+      setSelectedId(body.profile?.profile_id ?? selectedId);
     } catch (error) {
       setMessage({ tone: 'error', text: error.message });
     } finally {
@@ -193,17 +193,17 @@ const save = async (accept = true) => {
     setMessage({ tone: 'info', text: 'Describe one specific job objective, then save it.' });
   };
 
-  const activate = async (familyId) => {
+  const activate = async (profileId) => {
     setBusy(true);
     try {
-      const res = await fetch('/api/families/activate', {
+      const res = await fetch('/api/profiles/activate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ family_id: familyId }),
+        body: JSON.stringify({ profile_id: profileId }),
       });
       if (!res.ok) throw new Error('Could not switch profile');
       await load();
-      setSelectedId(familyId);
+      setSelectedId(profileId);
       setMessage({ tone: 'success', text: 'This profile is now the one searches run under.' });
     } catch (error) {
       setMessage({ tone: 'error', text: error.message });
@@ -232,17 +232,17 @@ const save = async (accept = true) => {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-2">
-            {families.length === 0 && (
+            {profiles.length === 0 && (
               <p className="text-sm text-muted-foreground">No profiles yet.</p>
             )}
-            {families.map((family) => {
-              const isActive = family.family_id === data?.active_family_id;
-              const isSelected = family.family_id === selectedId;
+            {profiles.map((profile) => {
+              const isActive = profile.profile_id === data?.active_profile_id;
+              const isSelected = profile.profile_id === selectedId;
               return (
                 <button
-                  key={family.family_id}
+                  key={profile.profile_id}
                   type="button"
-                  onClick={() => setSelectedId(family.family_id)}
+                  onClick={() => setSelectedId(profile.profile_id)}
                   className={cn(
                     'w-full rounded-xl border p-3 text-left transition-colors',
                     isSelected
@@ -252,7 +252,7 @@ const save = async (accept = true) => {
                 >
                   <div className="flex items-center justify-between gap-2">
                     <span className="truncate text-sm font-semibold text-foreground">
-                      {family.about || 'Untitled'}
+                      {profile.about || 'Untitled'}
                     </span>
                     {isActive && (
                       <span className="shrink-0 rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-primary">
@@ -261,9 +261,9 @@ const save = async (accept = true) => {
                     )}
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {family.counts.leads} lead{family.counts.leads === 1 ? '' : 's'} ·{' '}
-                    {family.counts.deferred_stored} held ·{' '}
-                    {family.counts.rejected ?? 0} rejected here
+                    {profile.counts.leads} lead{profile.counts.leads === 1 ? '' : 's'} ·{' '}
+                    {profile.counts.deferred_stored} held ·{' '}
+                    {profile.counts.rejected ?? 0} rejected here
                   </p>
                 </button>
               );
@@ -313,15 +313,15 @@ const save = async (accept = true) => {
 
               <div className="flex flex-wrap items-center gap-3">
                 <Button onClick={() => save(true)} loading={busy} disabled={!dirty || !draft.trim()}>
-                  {verdict?.new_family_required ? 'Create new profile' : 'Save profile'}
+                  {verdict?.new_profile_required ? 'Create new profile' : 'Save profile'}
                 </Button>
-                {verdict?.new_family_required && (
+                {verdict?.new_profile_required && (
                   <Button variant="outline" onClick={() => save(false)} disabled={busy}>
                     Keep my current profile
                   </Button>
                 )}
-                {selected && selected.family_id !== data?.active_family_id && (
-                  <Button variant="ghost" onClick={() => activate(selected.family_id)} disabled={busy}>
+                {selected && selected.profile_id !== data?.active_profile_id && (
+                  <Button variant="ghost" onClick={() => activate(selected.profile_id)} disabled={busy}>
                     Search under this profile
                   </Button>
                 )}

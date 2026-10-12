@@ -1,24 +1,12 @@
 """
-seen.py — the two "don't process this twice" memories.
+seen.py — the run-scoped "don't look at this twice" memory.
 
-They answer different questions and must not be confused:
+RunSeenIds lives in Redis DB 2 (run_state_broker), TTL'd to the run, and is
+shared by every worker. This is what makes keyword-level parallelism safe: two
+workers on different keywords can meet the same ad and only harvest it once.
 
-  SeenIndex   — "does this ad already have a FINAL verdict under this
-                 category+profile?"  Lives in Redis DB 1 (verdict_broker) and
-                 is mirrored in memory so the hot path (one lookup per scraped
-                 card) never makes a Redis round trip. The mirror is updated
-                 the moment we mark, so a verdict reached mid-run is visible to
-                 later keywords and later cycles of the SAME run.
-
-  RunSeenIds  — "has anything in the CURRENT run already looked at this ad?"
-                 Lives in Redis DB 2 (run_state_broker), TTL'd to the run, and
-                 is shared by every worker. This is what makes keyword-level
-                 parallelism safe: two workers on different keywords can meet
-                 the same ad and only harvest it once.
-
-Both are deliberately dumb. The difference is scope and lifetime: SeenIndex is
-"this ad was already judged, ever, under this lens" and outlives the run;
-RunSeenIds is "we saw it during this run" and dies with it.
+It is deliberately dumb. "Which verdicts already exist for this profile?" is a
+different question with a different home — see modules/verdicts.py.
 """
 
 import logging
@@ -188,30 +176,3 @@ class RunSeenIds:
         if self._redis_backed:
             safe_redis_operation(run_state_broker.delete, self.key)
 
-
-_INDEX_CACHE: dict[tuple[str, str, str], SeenIndex] = {}
-
-
-def get_seen_index(category: str, filters=None, refresh: bool = False) -> SeenIndex:
-    """
-    One shared mirror per category+profile namespace per process.
-
-    Cached because a run walks many keywords and cycles: reloading per cycle
-    would SCAN the namespace again for no benefit, the mirror only grows.
-    """
-    about_hash, filter_hash = compute_profile_hashes()
-    cache_key = (category, about_hash, filter_hash)
-    index = _INDEX_CACHE.get(cache_key)
-    if index is None:
-        index = SeenIndex(category, filters)
-        _INDEX_CACHE[cache_key] = index
-    if refresh:
-        index.load(force=True)
-    else:
-        index.load()
-    return index
-
-
-def reset_index_cache() -> None:
-    """Tests and profile edits: forget the mirrors entirely."""
-    _INDEX_CACHE.clear()
