@@ -41,6 +41,8 @@ from core import (
     PromptTimingRequest,
 )
 
+from .collection import FEEDBACK_HISTORY_LIMIT, last_batch, rank_for_harvest
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,40 +55,157 @@ def _json_hint(model_name: str) -> str:
 # ============================================================================
 
 _GENERATOR_SYSTEM = """\
-You generate Meta Ads Library SEARCH KEYWORDS for a lead-generation system.
+You write Meta Ads Library search keywords for a lead-generation system.
 
-You receive:
-  - the CATEGORY description (what kind of opportunity the user wants)
-  - the USER PROFILE (about the user: skills, projects, preferences)
-  - EXCLUSION PROMPTS (compressed territories already covered — do NOT \
-regenerate keywords inside these)
-  - SEARCHED KEYWORDS (already used, currently cooling down — do NOT \
-repeat them; variations that reach DIFFERENT advertisers are welcome)
+HOW META'S SEARCH WORKS — this decides everything:
+Meta ANDs every word you use. "python backend developer" means the ad must
+contain python AND backend AND developer. Every extra word narrows the result
+set, so it must earn its place: add a qualifier only when ads commonly pair it
+with that phrase. "python developer hiring" works because ads say exactly that.
+"python backend developer urgent" fails because almost no ad uses "backend"
+and "urgent" together.
+
+WRITE LIKE AN ADVERTISER, NOT A JOB SEEKER.
+The keywords that return results are the ones an employer puts in their own
+ad copy and targeting — the words they use to win reach, because an advertiser
+wants their ad seen. A job seeker types "python backend hiring urgent". No
+employer writes that. Job-seeker phrasing is the single reason this search
+used to come back empty.
 
 Rules:
-- Return 10-15 keywords, one search phrase each (2-5 words, as a real \
-person might search the ads library).
-- Each keyword must target UNCOVERED territory: a specific skill, \
-subskill, industry or hiring context implied by the user's profile.
-- Never return a keyword from the searched list or inside an exclusion \
-prompt's territory.
-- No timestamps, no explanations in the array itself.
+- 10-15 keywords, each 2-5 words, as a plain noun phrase naming a role, a
+  skill or a stack.
+- Name what the person DOES: the technology, the craft, the role.
+- Prefer the phrase an advertiser would actually use. "fastapi developer"
+  beats "fastapi backend engineer" because the second asks for two things ads
+  rarely advertise together.
+- No timestamps, no locations.
+
+VERIFIED to return results — Meta's own counts for the last month:
+  python developer ............ ~1,100 results
+  javascript developer ........ ~780 results
+  ai automation specialist ..... hundreds
+  backend developer ........... hundreds
+
+VERIFIED to return NOTHING — every one of these matched zero ads:
+  python backend consultant wanted
+  fastapi engineer contract role
+  web scraping project hiring
+  python scripting job vacancy
+  fastapi backend developer opening
+
+Do not chase volume for its own sake. A broad keyword is only useful if the ads
+are the right KIND — name the skill and let the judge decide the rest.
+
+You also receive:
+- EXCLUSION PROMPTS — territories already covered. Do not generate keywords
+  inside them.
+- YOUR MOST RECENT BATCH — what you wrote last time and what it returned. Read
+  it against YOUR PROVEN KEYWORDS below: if the batch drifted away from that
+  shape, the results will show it. Say in `notes` what you changed as a result.
+- EVERYTHING TRIED SO FAR — every keyword you have written, with what it found.
+  Zero ads means that exact phrase matched nothing: do not repeat it, and do
+  not produce a variation of it. Ads but no leads means the search worked and
+  the leads were declined, which is a different problem and a different reason
+  to move on.
+- YOUR PROVEN KEYWORDS — the ones that found leads for this person. Write
+  variations of THEIR shape.
 
 Answer with JSON only:
 {"keywords": ["...", "..."], "notes": "<max 25 words on your targeting strategy>"}
 """
 
+# How many proven keywords to show as exemplars.
+PROVEN_KEYWORD_LIMIT = 5
+
+
+def _one_outcome(stats: KeywordStats) -> str:
+    """One line of honest feedback: what this keyword actually returned."""
+    lifetime = "over %d searches" % stats.runs_searched if stats.runs_searched > 1 else "last search"
+    if stats.relevant_ads:
+        return f"{stats.ads_fetched} ads, {stats.relevant_ads} lead(s) {lifetime}"
+    if stats.ads_fetched:
+        return f"{stats.ads_fetched} ads, none wanted {lifetime}"
+    return "0 ads — phrase too narrow"
+
+
+def _feedback_blocks(
+    stats: list[KeywordStats],
+    batch: list[KeywordStats] | None = None,
+) -> str:
+    """
+    What the generator is told about the keywords already tried.
+
+    Three views, because they answer three different questions:
+
+      most recent batch — where did my last attempt land?
+      proven keywords  — where should it land?
+      everything tried — what have I already learned?
+
+    The first two are shown together deliberately. A leaderboard alone cannot
+    show drift; putting the latest batch beside the exemplars lets the model
+    notice it is writing phrases that never match and correct itself, which is
+    the one thing a list of past mistakes cannot tell it.
+
+    Returns "" when there is nothing to report, which is the normal state on a
+    first run and after a reset. The prompt degrades to its original shape
+    rather than carrying empty headings — an unused feedback section is just
+    noise the model has to reason past.
+    """
+    if not stats:
+        return ""
+
+    if batch is None:
+        batch = last_batch(stats)
+
+    ranked = rank_for_harvest(stats)
+    proven = [s for s in ranked if s.relevant_ads > 0][:PROVEN_KEYWORD_LIMIT]
+    shown = ranked[:FEEDBACK_HISTORY_LIMIT]
+
+    blocks = []
+
+    if batch:
+        lines = "\n".join(f'- "{s.keyword}" — {_one_outcome(s)}' for s in batch)
+        blocks.append(
+            "YOUR MOST RECENT BATCH — what you wrote last time, and what it "
+            "returned. Compare it against YOUR PROVEN KEYWORDS below:\n" + lines
+        )
+
+    if proven:
+        winners = "\n".join(f'- "{s.keyword}"' for s in proven)
+        blocks.append(
+            "YOUR PROVEN KEYWORDS — these reached real advertisers and produced "
+            "leads for this person. Write variations of THEIR shape, not "
+            "repetitions of the words:\n" + winners
+        )
+    else:
+        blocks.append(
+            "YOUR PROVEN KEYWORDS: none yet — no keyword tried so far has produced "
+            "a lead. Nothing here is a shape worth copying."
+        )
+
+    history = "\n".join(f'- "{s.keyword}" — {_one_outcome(s)}' for s in shown)
+    remainder = len(ranked) - len(shown)
+    if remainder > 0:
+        history += f"\n({remainder} older keyword(s) omitted — all weaker than the ones above)"
+    blocks.append(
+        "EVERYTHING TRIED SO FAR (do not repeat these, and do not produce "
+        "variations of the ones that found nothing):\n" + history
+    )
+
+    return "\n\n" + "\n\n".join(blocks)
+
 
 async def generate_keywords(request: KeywordGenerationRequest) -> KeywordBatch:
     client = AIClient()
+    feedback = _feedback_blocks(request.searched_keywords)
     user_prompt = (
         f"CATEGORY DESCRIPTION:\n{request.category_description}\n\n"
         f"USER PROFILE:\n{request.user_profile_text or '(not provided)'}\n\n"
         f"EXCLUSION PROMPTS (territories already covered — avoid):\n"
         + ("\n".join(f"- {p}" for p in request.exclusion_prompts) or "(none)")
         + "\n\n"
-        f"SEARCHED KEYWORDS (already used — do not repeat):\n"
-        + ("\n".join(f"- {k}" for k in request.searched_keywords) or "(none)")
+        + (feedback or "SEARCHED KEYWORDS: none yet — this is the first batch.")
         + f"\n\nGenerate {request.target_count} new search keywords "
         f"(10-{max(10, request.target_count)})."
     )

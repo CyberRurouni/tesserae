@@ -59,9 +59,20 @@ def _stats_for_round(
     ads_by_kw: dict[str, int],
     relevant_by_kw: dict[str, int],
     category: str,
+    searched_at: datetime | None = None,
 ) -> list[KeywordStats]:
-    """One KeywordStats per generated keyword — zeros included (evidence is evidence)."""
-    now = datetime.now(timezone.utc)
+    """
+    One KeywordStats per keyword searched this cycle — zeros included.
+
+    Every keyword in a cycle carries the SAME `searched_at` instant, which is
+    what lets `collection.last_batch` identify the batch exactly: the newest
+    stamp is the last batch and everything sharing it belongs to it.
+
+    Each record describes ONE search. Accumulating it into the keyword's
+    lifetime is the collection's job (`merge_with_history` / `save_keyword`),
+    so there is exactly one place where numbers get added together.
+    """
+    now = searched_at or datetime.now(timezone.utc)
     stats = []
     for kw in array:
         relevant = relevant_by_kw.get(kw, 0)
@@ -73,6 +84,7 @@ def _stats_for_round(
                 ads_fetched=ads_by_kw.get(kw, 0),
                 relevant_ads=relevant,
                 last_relevant_hit_at=now if relevant else None,
+                last_searched_at=now,
                 status_hint="alive" if relevant else "new",
             )
         )
@@ -174,18 +186,35 @@ async def run_orchestrator(
 
         while True:
             live = coll.load_collection(category_id, config.profile_id)
-            keywords_live: list[KeywordStats] = live["keywords"]
+            # Everything we have ever searched — the generator's memory, and the
+            # pool the keyword leaderboard is ranked from.
+            keywords_known: list[KeywordStats] = live["keywords"]
+            # The subset whose cooldown has elapsed: the live pool. Harvest
+            # re-searches this, and the coverage reviewer sizes itself on it.
+            keywords_live: list[KeywordStats] = live["searchable"]
             prompts_live: list[str] = [p["prompt"] for p in live["prompts"]]
 
             # ---------------- HARVEST MODE ----------------
             if coll.harvest_active(category_id, config.profile_id):
-                logger.info("🌾 Harvest mode: re-searching %d alive keyword(s) for fresh ads", len(keywords_live))
+                pool = keywords_live
+                logger.info("🌾 Harvest mode: %d searchable keyword(s) in the pool", len(pool))
+
+                # The user picks what gets re-searched: either a number ("top
+                # 20") or the keywords themselves. Harvest exists to catch ads
+                # posted SINCE the last pass, so the keywords worth a second
+                # pass are the ones that earned leads — ranked, not arbitrary.
+                harvested, notes = coll.resolve_harvest(
+                    pool, config.harvest_limit, config.harvest_keywords,
+                )
+                for note in notes:
+                    logger.warning("⚠️  Harvest: %s", note)
+
                 # Harvest re-searches what it already has. Keywords the user
                 # typed for THIS run are not in that collection, so silently
                 # replacing them meant typing a keyword and watching it never
                 # be searched — with no error, and harvest mode is silent
                 # enough that nothing on screen suggests why.
-                round_keywords = [s.keyword for s in keywords_live]
+                round_keywords = list(harvested)
                 if provided_pending and user_keywords:
                     round_keywords = user_keywords + round_keywords
                     provided_pending = False
@@ -194,6 +223,7 @@ async def run_orchestrator(
                         len(user_keywords),
                     )
                 if not round_keywords:
+                    logger.info("🌾 Harvest mode: nothing selected to re-search — stopping")
                     return totals
                 relevant, _, _ = await _search_and_judge(
                     round_keywords, config, additional_filters, context, run_id,
@@ -217,7 +247,11 @@ async def run_orchestrator(
                 category_description=_category_description(category_id),
                 user_profile_text=_profile_text(about),
                 exclusion_prompts=prompts_live,
-                searched_keywords=[s.keyword for s in keywords_live],
+                # Full history WITH what each keyword actually returned. A bare
+                # list of names told the generator only what to avoid; the stats
+                # tell it which shape reached advertisers, which is the only
+                # thing that makes its next batch better than its last.
+                searched_keywords=keywords_known,
                 target_count=config.keywords_per_generation,
             )
             batch = await actors.generate_keywords(request)
@@ -240,20 +274,36 @@ async def run_orchestrator(
             totals["relevant_ads"] += relevant
 
             # ---------------- TIMING (Actor 2) ----------------
-            # Over the generated array only: the user-provided keywords were
-            # never part of the managed collection, exactly as before.
-            stats = _stats_for_round(array, ads_by_kw, relevant_by_kw, category_id)
+            # Over EVERY keyword searched this cycle, the user's own included.
+            # The typed ones used to be left out, which meant the keywords that
+            # actually work best — the ones a person thought of — were invisible
+            # to both the cooldown and the leaderboard the generator learns from.
+            stats = _stats_for_round(
+                search_array, ads_by_kw, relevant_by_kw, category_id,
+                searched_at=datetime.now(timezone.utc),
+            )
+            # Actor 2 weighs a keyword's long-term value from how many times it
+            # has been searched. It was always handed exactly one search, so
+            # fold in the history before it decides anything.
+            stats = coll.merge_with_history(stats, category_id, config.profile_id)
             timings = await actors.assign_keyword_timings(stats)
             for s in stats:
                 t = timings.get(s.keyword)
                 days = t.reuse_after_days if t and t.reuse_after_days is not None else 1
-                coll.save_keyword(s, category_id, datetime.now(timezone.utc) + timedelta(days=days),
-                                 profile_id=config.profile_id)
-                logger.info("⏳ %r -> reuse in %d day(s) (%s)", s.keyword, days, t.reason if t else "default")
+                saved = coll.save_keyword(
+                    s, category_id,
+                    datetime.now(timezone.utc) + timedelta(days=days),
+                    profile_id=config.profile_id,
+                )
+                logger.info(
+                    "⏳ %r -> reuse in %d day(s) (%s) · lifetime: %d search(es), %d ads, %d lead(s)",
+                    s.keyword, days, t.reason if t else "default",
+                    saved.runs_searched, saved.ads_fetched, saved.relevant_ads,
+                )
 
             # ---------------- THRESHOLD -> COVERAGE REVIEW ----------------
             live = coll.load_collection(category_id, config.profile_id)
-            keywords_live = live["keywords"]
+            keywords_live = live["searchable"]
             if len(keywords_live) < config.keyword_pool_limit:
                 logger.info("📚 Collection: %d/%d — below limit, next cycle", len(keywords_live), config.keyword_pool_limit)
                 continue

@@ -534,16 +534,32 @@ def test_cycles():
         # a second argument. Recording it is how these tests assert the pool is
         # not shared across profiles.
         scopes = []
+        saved = []
+        harvest_calls = []
 
         def load_collection(self, c, profile_id=None):
             Coll.scopes.append(profile_id)
-            return {"keywords": [], "prompts": []}
+            # "keywords" is everything ever searched; "searchable" is the
+            # subset whose cooldown has elapsed. Separate keys, because the
+            # generator's memory and the live pool are different questions.
+            return {"keywords": [], "searchable": [], "prompts": []}
 
         def harvest_active(self, c, profile_id=None):
             Coll.scopes.append(profile_id)
             return False
 
-        def save_keyword(self, *a, **k): pass
+        def merge_with_history(self, stats, *a, **k):
+            return list(stats)
+
+        def resolve_harvest(self, searchable, limit=20, chosen=None):
+            Coll.harvest_calls.append({"pool": len(searchable),
+                                       "limit": limit, "chosen": chosen})
+            return [s.keyword for s in searchable], []
+
+        def save_keyword(self, stats, *a, **k):
+            Coll.saved.append(getattr(stats, "keyword", None))
+            return stats
+
         def save_prompt(self, *a, **k): pass
         def delete_keywords(self, *a, **k): pass
         def set_harvest_flag(self, *a, **k): pass
@@ -668,7 +684,8 @@ def test_cycles():
             return True
 
         def load_collection(self, c, profile_id=None):
-            return {"keywords": [types.SimpleNamespace(keyword="pool keyword")], "prompts": []}
+            pool = [types.SimpleNamespace(keyword="pool keyword")]
+            return {"keywords": pool, "searchable": pool, "prompts": []}
 
     om.browser_session, om.run_scrape = browser, scrape2
     om.coll = HarvestColl()
@@ -789,6 +806,200 @@ def test_active_pointer():
           act.active_request_id() != stranger.request_id)
 
 
+# ── 10. the keyword record is a life, not a snapshot ────────────────────────
+def test_keyword_lifetime():
+    """A keyword searched twice must remember both searches, not just the last."""
+    print("\n[14] a keyword's record accumulates instead of being overwritten")
+    from datetime import datetime, timedelta, timezone
+
+    import modules.orchestrator.collection as C
+    from core import KeywordStats
+
+    cat = "keyword_lifetime_test"
+    scope = "prof_lifetime"
+    when = datetime.now(timezone.utc)
+    C.delete_keywords(cat, ["lifetime kw"], scope)
+
+    # Cycle 1 — a good day.
+    first = C.save_keyword(
+        KeywordStats(keyword="lifetime kw", runs_searched=1, ads_fetched=30,
+                     relevant_ads=4, last_relevant_hit_at=when),
+        cat, when + timedelta(days=5), profile_id=scope,
+    )
+    check("cycle 1 is stored", first.runs_searched == 1 and first.relevant_ads == 4,
+          f"runs={first.runs_searched} leads={first.relevant_ads}")
+
+    # Cycle 2 — a quiet day, then a partial one.
+    C.save_keyword(
+        KeywordStats(keyword="lifetime kw", runs_searched=1, ads_fetched=0, relevant_ads=0),
+        cat, when + timedelta(days=3), profile_id=scope,
+    )
+    after_quiet = C.save_keyword(
+        KeywordStats(keyword="lifetime kw", runs_searched=1, ads_fetched=12,
+                     relevant_ads=1, last_relevant_hit_at=when),
+        cat, when + timedelta(days=2), profile_id=scope,
+    )
+
+    check("searches accumulate", after_quiet.runs_searched == 3,
+          f"runs={after_quiet.runs_searched}")
+    check("leads accumulate rather than resetting",
+          after_quiet.relevant_ads == 5, f"leads={after_quiet.relevant_ads}")
+    check("ads accumulate", after_quiet.ads_fetched == 42,
+          f"ads={after_quiet.ads_fetched}")
+    check("a keyword that once found leads stays alive",
+          after_quiet.status_hint == "alive", str(after_quiet.status_hint))
+
+    # The whole point: a quiet day must not erase a proven keyword. Before this,
+    # cycle 2 alone would have read "0 leads" and the leaderboard would have
+    # dropped the keyword entirely.
+    print("\n[15] the cooldown expires; the record does not")
+    check("the record outlives its cooldown",
+          C.load_keyword("lifetime kw", cat, scope) is not None)
+
+    live = C.load_collection(cat, profile_id=scope)
+    check("a keyword inside its cooldown is not searchable",
+          all(s.keyword != "lifetime kw" for s in live["searchable"]),
+          f"searchable={[s.keyword for s in live['searchable']]}")
+    check("but it is still known", len(live["keywords"]) == 1,
+          f"known={len(live['keywords'])}")
+
+    # Once the cooldown lapses it joins the pool again — same record, not a new one.
+    C.save_keyword(
+        KeywordStats(keyword="lifetime kw", runs_searched=1, ads_fetched=5, relevant_ads=0),
+        cat, when - timedelta(days=1), profile_id=scope,
+    )
+    live = C.load_collection(cat, profile_id=scope)
+    check("an expired cooldown makes it searchable again",
+          any(s.keyword == "lifetime kw" for s in live["searchable"]),
+          f"searchable={[s.keyword for s in live['searchable']]}")
+    reopened = live["searchable"][0]
+    check("and the accumulated history survived the wait",
+          reopened.runs_searched == 4 and reopened.relevant_ads == 5,
+          f"runs={reopened.runs_searched} leads={reopened.relevant_ads}")
+
+    check("the record TTL is far longer than any cooldown",
+          C.STATS_RECORD_TTL is None,
+          "records never expire — the cooldown governs searchability instead")
+
+    # ── the generator's feedback ────────────────────────────────────────────
+    print("\n[16] the generator is told what its keywords actually did")
+    import modules.orchestrator.actors as A
+
+    check("no history means no feedback section", A._feedback_blocks([]) == "")
+
+    block = A._feedback_blocks([
+        KeywordStats(keyword="ai automation specialist", runs_searched=3,
+                     ads_fetched=45, relevant_ads=9),
+        KeywordStats(keyword="backend developer", runs_searched=1,
+                     ads_fetched=24, relevant_ads=0),
+        KeywordStats(keyword="python backend developer urgent", runs_searched=1,
+                     ads_fetched=0, relevant_ads=0),
+    ])
+    check("a proven keyword is named as an exemplar",
+          "YOUR PROVEN KEYWORDS" in block and "ai automation specialist" in block)
+    check("a zero-ad keyword is marked too narrow, not merely 'rejected'",
+          "python backend developer urgent" in block and "too narrow" in block)
+    check("finds-but-no-leads is distinguished from finds-nothing",
+          "none wanted" in block and "0 ads —" in block)
+    check("the whole history is shown, not just the winners",
+          "EVERYTHING TRIED SO FAR" in block)
+
+    many = [
+        KeywordStats(keyword=f"kw {i}", runs_searched=1, ads_fetched=0, relevant_ads=0)
+        for i in range(60)
+    ]
+    big = A._feedback_blocks(many)
+    check("a long history is capped so it cannot bury the signal",
+          big.count("\n- ") <= C.FEEDBACK_HISTORY_LIMIT + 1,
+          f"{big.count(chr(10) + '- ')} lines")
+    check("with no winners it says so rather than implying any",
+          "none yet" in big)
+
+    # ── the prompt itself ───────────────────────────────────────────────────
+    print("\n[17] the prompt teaches the mechanic, not the guesswork")
+    sys_prompt = A._GENERATOR_SYSTEM.lower()
+    check("it states that Meta ANDs the terms", "ands every word" in sys_prompt)
+    check("it frames keywords as advertiser vocabulary",
+          "advertiser" in sys_prompt and "job seeker" in sys_prompt)
+    check("it cites a verified result count",
+          "1,100" in sys_prompt and "780" in sys_prompt)
+    check("it cites keywords verified to match nothing",
+          "return nothing" in sys_prompt)
+    check("it explains WHY terms narrow, not just that they do",
+          "earn its place" in sys_prompt)
+    # The ban list was removed on purpose: the data contradicts it. The single
+    # best keyword in the system's history is "python developer hiring", and
+    # "remote" appears on both sides of the ledger. A ban list would suppress a
+    # pattern that demonstrably works, so the prompt teaches the mechanism and
+    # lets the feedback do the correcting.
+    check("no hardcoded ban list", "banned:" not in sys_prompt)
+    check("it does not forbid a word its own exemplars use",
+          "never add hiring" not in sys_prompt)
+    check("the old coaching that caused the problem is gone",
+          "hiring context" not in sys_prompt)
+    check("the latest batch is compared against the exemplars",
+          "most recent batch" in sys_prompt)
+
+    # ── harvest: the user decides, the system proposes ──────────────────────
+    print("\n[18] harvest re-searches what earned leads, and the user can override")
+    pool = [
+        KeywordStats(keyword="quiet one", runs_searched=2, ads_fetched=0, relevant_ads=0),
+        KeywordStats(keyword="big winner", runs_searched=3, ads_fetched=90, relevant_ads=12),
+        KeywordStats(keyword="fetches plenty", runs_searched=1, ads_fetched=40, relevant_ads=0),
+        KeywordStats(keyword="steady", runs_searched=1, ads_fetched=8, relevant_ads=3),
+    ]
+
+    ranked = [s.keyword for s in C.rank_for_harvest(pool)]
+    check("leads rank first", ranked[0] == "big winner", str(ranked))
+    check("a working search outranks one that found nothing",
+          ranked.index("fetches plenty") < ranked.index("quiet one"), str(ranked))
+
+    top, _ = C.resolve_harvest(pool, limit=2)
+    check("the limit is honoured", top == ["big winner", "steady"], str(top))
+    check("a limit of 0 harvests nothing rather than everything",
+          C.resolve_harvest(pool, limit=0)[0] == [])
+
+    picked, _ = C.resolve_harvest(pool, limit=2, chosen=["quiet one", "big winner"])
+    check("an explicit choice overrides the ranking", picked == ["quiet one", "big winner"],
+          str(picked))
+
+    _, notes = C.resolve_harvest(pool, chosen=["cooling down kw", "steady"])
+    check("a keyword that is not searchable is refused, not silently searched",
+          len(notes) == 1 and "cooling down" in notes[0], str(notes))
+
+    # ── the last batch, identified by its shared instant ────────────────────
+    print("\n[19] the generator can see where its last batch drifted")
+    from datetime import datetime, timedelta, timezone
+
+    older = datetime.now(timezone.utc) - timedelta(days=2)
+    newest = datetime.now(timezone.utc)
+    history = [
+        KeywordStats(keyword="proven shape", runs_searched=2, ads_fetched=40,
+                     relevant_ads=6, last_searched_at=older),
+        KeywordStats(keyword="drifted away", runs_searched=1, ads_fetched=0,
+                     relevant_ads=0, last_searched_at=newest),
+        KeywordStats(keyword="also drifted", runs_searched=1, ads_fetched=0,
+                     relevant_ads=0, last_searched_at=newest),
+    ]
+    batch = C.last_batch(history)
+    check("the last batch is the newest instant's keywords",
+          {s.keyword for s in batch} == {"drifted away", "also drifted"},
+          str([s.keyword for s in batch]))
+
+    block = A._feedback_blocks(history)
+    check("the last batch is shown separately", "YOUR MOST RECENT BATCH" in block)
+    check("the exemplars are shown beside it", "YOUR PROVEN KEYWORDS" in block)
+    check("the batch block tells the model to compare the two",
+          "compare it against" in block.lower())
+    batch_section = block.split("YOUR PROVEN KEYWORDS")[0]
+    check("a keyword searched earlier is not listed as part of the last batch",
+          '"proven shape"' not in batch_section, str(batch_section.strip()[-120:]))
+    check("it still appears once as an exemplar",
+          '"proven shape"' in block.split("EVERYTHING TRIED SO FAR")[0])
+
+    C.delete_keywords(cat, ["lifetime kw"], scope)
+
+
 def main():
     print("═" * 62)
     print("  Tesserae regression — sandbox:", _SANDBOX)
@@ -801,6 +1012,7 @@ def main():
     test_cycles()
     test_corrections()
     test_active_pointer()
+    test_keyword_lifetime()
 
     # Leave nothing behind. Safe because TESSERAE_REDIS_DB_OFFSET moved these
     # databases off the ones the app uses.

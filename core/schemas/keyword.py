@@ -34,6 +34,11 @@ class KeywordStats(BaseModel):
     """
     Per-keyword performance — computed by the script, judged by the AI.
     Accumulated ACROSS every search of this keyword, not just the last.
+
+    The accumulation is the point. A keyword that found leads on Monday and
+    nothing on Tuesday has still found leads: it has a life, not a snapshot.
+    A one-cycle record could not tell those two apart, which made "proven"
+    mean "lucky last Tuesday" and left the judge of keyword quality guessing.
     """
 
     keyword: str
@@ -43,6 +48,23 @@ class KeywordStats(BaseModel):
     relevant_ads: int = 0       # survived the AI relevance checkpoint
     last_relevant_hit_at: datetime | None = None
     status_hint: KeywordStatus = KeywordStatus.new
+    # When this keyword may be searched again — Actor 2's cooldown decision,
+    # resolved to an absolute time by the script.
+    #
+    # Held inside the record rather than left to Redis expiry, because search
+    # eligibility and the evidence are different questions and must expire
+    # differently: a keyword stops being worth searching on schedule, but what
+    # it returned is worth remembering until it is forgotten deliberately.
+    reuse_at: datetime | None = None
+    # When this keyword was last searched. Every keyword in one cycle is stamped
+    # with the SAME instant, which is what identifies "the last batch" without a
+    # separate batch id: the newest stamp is the last batch, and everything
+    # sharing it is that batch.
+    #
+    # The generator is shown both its latest batch and its proven performers so
+    # it can see the gap between where it is and where it should be. That
+    # comparison is the whole point — a leaderboard alone cannot show drift.
+    last_searched_at: datetime | None = None
 
 
 class KeywordGenerationRequest(BaseModel):
@@ -51,7 +73,12 @@ class KeywordGenerationRequest(BaseModel):
     category_description: str
     user_profile_text: str                    # about-us + additional filters
     exclusion_prompts: list[str] = Field(default_factory=list)
-    searched_keywords: list[str] = Field(default_factory=list)  # incl. expired history
+    # Full keyword history, stats included. Not a bare list of strings: a name
+    # the generator has already avoided teaches it nothing, whereas the same
+    # name with "0 ads found" teaches it exactly what it got wrong. The stats
+    # also carry the proven performers, which is the only feedback that tells
+    # the generator which SHAPE of keyword actually reaches advertisers.
+    searched_keywords: list[KeywordStats] = Field(default_factory=list)
     target_count: int = 12                    # 10-15 per approved design
 
 

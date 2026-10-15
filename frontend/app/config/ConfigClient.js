@@ -89,6 +89,9 @@ export default function ConfigClient() {
         ad_age: filters.ad_age_hours ? Number(filters.ad_age_hours) : null,
         languages: filters.languages === 'all' ? [] : filters.languages,
         regions: filters.regions || 'ALL',
+        harvest_limit: Number(filters.harvest_limit) || 0,
+        // Only an explicit selection is sent; a bare number lets the backend rank.
+        harvest_keywords: filters.harvest_keywords?.length ? filters.harvest_keywords : null,
       };
 
       const res = await fetch('/api/runs', {

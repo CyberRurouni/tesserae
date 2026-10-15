@@ -73,6 +73,8 @@ async def _run_with_filters(
     profile_id: str | None = None,
     request_id: str | None = None,
     parallel_workers: int = 1,
+    harvest_limit: int = 20,
+    harvest_keywords: list[str] | None = None,
     on_progress=None,
 ) -> dict:
     """Run the orchestrator with the given filters and return the summary.
@@ -80,6 +82,8 @@ async def _run_with_filters(
     run_id: when given, every cycle of the run appends to ONE result file
     named <run_id>.json (the id the API handed the UI); when None (CLI) each
     record call keeps writing a fresh timestamped run_<stamp>.json.
+    harvest_limit / harvest_keywords: only consulted when the profile is in
+    harvest mode. An explicit keyword list overrides the number.
     """
     about, _ = load_profile()
     profile = UserProfile(background=about or "(about-us file empty)")
@@ -91,6 +95,8 @@ async def _run_with_filters(
             profile_id=profile_id,
             request_id=request_id,
             parallel_workers=parallel_workers,
+            harvest_limit=harvest_limit,
+            harvest_keywords=harvest_keywords,
         ),
         headless=False,
         max_cycles=cycles,

@@ -63,3 +63,12 @@ class RunConfig(BaseModel):
     # Harvest mode (all skills covered): sleep until the recheck date
     # reopens generation.
     harvest_enabled: bool = True
+
+    # How many keywords a harvest round re-searches. Ranked by accepted leads,
+    # because harvest's whole value is "what worked last time, show me what
+    # appeared since" — a keyword that found nothing earns no second pass.
+    # 0 means harvest re-searches nothing on its own.
+    harvest_limit: int = 20
+    # An explicit selection overrides harvest_limit. Named keywords that are not
+    # in the searchable pool are reported rather than silently searched.
+    harvest_keywords: list[str] | None = None

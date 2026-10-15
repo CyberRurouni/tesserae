@@ -29,6 +29,7 @@ from pydantic import BaseModel, field_validator
 from interface import log_buffer
 from interface.profiles_api import router as profiles_router
 from interface.heuristics_api import router as heuristics_router
+from interface.keywords_api import router as keywords_router
 from interface.orchestrate import _run_with_filters
 from interface.select_filters import build_scraping_filters
 from interface.verdicts_api import router as verdicts_router
@@ -88,6 +89,11 @@ class RunRequest(BaseModel):
     # Keywords crawled at once. 1 keeps the original sequential behaviour;
     # raise it for speed at the cost of captcha exposure.
     parallel_workers: int = 1
+    # Harvest (all-covered mode): how many of the pool's best keywords to
+    # re-search, or an explicit list that overrides the number. None leaves the
+    # decision to the backend's ranking.
+    harvest_limit: int = 20
+    harvest_keywords: Optional[list[str]] = None
 
     @field_validator("keywords", mode="before")
     @classmethod
@@ -213,6 +219,7 @@ def _keyword_targets(request: RunRequest) -> int:
 app.include_router(profiles_router)
 app.include_router(verdicts_router)
 app.include_router(heuristics_router)
+app.include_router(keywords_router)
 
 
 # ── Run lifecycle ──────────────────────────────────────────────────────────
@@ -276,11 +283,24 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
         if request.run_mode == "generate" and coll.harvest_active(
             request.category or "career_jobs", profile.profile_id
         ):
-            state["note"] = (
-                "Harvest mode is active: the AI will re-search this profile's own "
-                "keyword pool instead of generating new ones. Your keywords are "
-                "searched first."
+            from modules.orchestrator import collection as kcoll
+
+            selection, notes = kcoll.resolve_harvest(
+                kcoll.load_collection(request.category or "career_jobs",
+                                      profile.profile_id)["searchable"],
+                max(0, int(request.harvest_limit or 0)),
+                request.harvest_keywords or None,
             )
+            state["harvest_keywords"] = selection
+            state["note"] = (
+                "Harvest mode is active: instead of generating new keywords, "
+                f"Tesserae re-searches {len(selection)} of this profile's "
+                "highest-yielding keywords for ads posted since. Your own "
+                "keywords are searched first."
+            )
+            for note in notes:
+                state.setdefault("harvest_notes", []).append(note)
+                logger.warning("Harvest selection: %s", note)
 
         logger.info(
             "Run %s starting with %d keyword(s), mode=%s, profile=%s",
@@ -327,6 +347,8 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
             request.profile_id,
             request.request_id,
             max(1, min(int(request.parallel_workers or 1), 3)),
+            harvest_limit=max(0, int(request.harvest_limit or 0)),
+            harvest_keywords=request.harvest_keywords or None,
             on_progress=on_progress,
         )
 

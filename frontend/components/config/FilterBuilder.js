@@ -6,6 +6,7 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter }
 import { Select } from '@/components/ui/Select';
 import { cn } from '@/lib/utils';
 import { clearDraft, readDraft, writeDraft } from '@/lib/draft';
+import HarvestPanel from '@/components/config/HarvestPanel';
 import HeuristicsPanel from '@/components/config/HeuristicsPanel';
 
 const PLATFORMS = [
@@ -52,6 +53,10 @@ const INITIAL = {
   cycles: 3,
   run_until_complete: false,
   parallel_workers: 1,
+  // Harvest: how many of the pool's best keywords to re-search, or an
+  // explicit list that overrides the number.
+  harvest_limit: 20,
+  harvest_keywords: [],
   heuristic_patterns: {
     require_ad_text_patterns: [],
     require_any_ad_text_patterns: [],
@@ -252,6 +257,8 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
         Math.max(Number(merged.parallel_workers) || INITIAL.parallel_workers, 1),
         MAX_PARALLEL_WORKERS
       ),
+      harvest_limit: Math.max(0, Number(merged.harvest_limit) || INITIAL.harvest_limit),
+      harvest_keywords: Array.isArray(merged.harvest_keywords) ? merged.harvest_keywords : [],
     };
   }, [initialData]);
 
@@ -304,6 +311,10 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
   }, [onRunModeChange]);
 
   const setKeywords = useCallback((value) => update('keywords', value), [update]);
+  // The harvest picker is its own state, deliberately NOT the keyword box:
+  // harvest_keywords are keywords from a PREVIOUS run being re-searched,
+  // and merging the two would make "search my keywords" ambiguous.
+  const setHarvestKeywords = useCallback((value) => update('harvest_keywords', value), [update]);
 
   // Seeding is a one-off: once the box is ticked the user owns the list and can
   // add or remove keywords freely without the checkbox clobbering their edits.
@@ -663,6 +674,15 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
       patterns={formData.heuristic_patterns}
       onChange={(next) => update('heuristic_patterns', next)}
     />
+
+    {formData.run_mode === 'generate' && (
+      <HarvestPanel
+        limit={formData.harvest_limit}
+        onLimitChange={(value) => update('harvest_limit', value)}
+        keywords={formData.harvest_keywords}
+        onKeywordsChange={setHarvestKeywords}
+      />
+    )}
     </>
   );
 }

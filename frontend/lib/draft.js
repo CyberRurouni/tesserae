@@ -35,6 +35,8 @@ const KEEP = [
   'run_until_complete',
   'ad_age',
   'parallel_workers',
+  'harvest_limit',
+  'harvest_keywords',
 ];
 
 export function readDraft() {
