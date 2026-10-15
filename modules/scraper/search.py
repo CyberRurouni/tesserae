@@ -48,10 +48,19 @@ SCROLL_POLL_MS = 100
 # The ceiling only matters at the end of the results, where nothing is coming
 # and the caller's quiet-step counter is what decides.
 SCROLL_CEILING_MS = 1500
-# Scroll geometry. Distance adapts within these bounds — see _next_distance.
-SCROLL_DISTANCE_PX = 4000
-SCROLL_DISTANCE_MAX_PX = 6000
-SCROLL_DISTANCE_MIN_PX = 1800
+# Scroll geometry.
+#
+# ONE fixed distance, every scroll, chosen because Meta's results list is
+# virtualised and a jump larger than the renderer can keep up with skips cards
+# that were rendered and never handed to us. That failure is invisible — the
+# crawl simply reports fewer ads — so the distance is deliberately small enough
+# that skipping is not something we can talk ourselves into. The cost is more
+# round trips per keyword, which is a wall-clock price and not a lost lead.
+#
+# This used to adapt: it grew 30% per productive step up to 6000px and halved
+# on a miss, trading completeness for speed. Growth is exactly the behaviour
+# that could skip, so it is gone.
+SCROLL_DISTANCE_PX = 1800
 
 # ============================================================================
 # 🔹 SELECTORS / UI HOOKS — used by the fallback gate flow only.
@@ -573,57 +582,49 @@ async def scroll_step(
 
 
 
-class ScrollPacer:
+# Put the pane back at an absolute offset — used to resume a crawl after a
+# stuck-pane reload, so the reload does not cost us the whole list again.
+SCROLL_PANE_TO_JS = """
+([top]) => {
+  let target = null, best = 0;
+  for (const el of document.querySelectorAll('*')) {
+    if (el.scrollHeight > el.clientHeight + 40) {
+      const style = window.getComputedStyle(el);
+      if (/(auto|scroll|overlay)/.test(style.overflowY)
+          && el.scrollHeight > best) {
+        best = el.scrollHeight;
+        target = el;
+      }
+    }
+  }
+  if (target) { target.scrollTop = top; return target.scrollTop; }
+  window.scrollTo(0, top);
+  return Math.round(window.scrollY);
+}
+"""
+
+
+async def scroll_depth(page: Page) -> int:
+    """Current offset of the results pane. 0 when it cannot be read."""
+    return await _scroll_offset(page)
+
+
+async def restore_scroll_depth(page: Page, depth: int) -> int:
     """
-    How far to scroll next, adapted to what the last step actually returned.
+    Put the results pane back at `depth`. Returns where it actually landed.
 
-    Scrolling further covers more ground per round-trip to Meta, and a round
-    trip costs seconds — so a bigger step is a real saving. The risk is silent
-    data loss: Meta's results list is virtualised, so a jump large enough to
-    outrun the renderer skips past cards that were rendered and never handed to
-    us. That failure is invisible — the crawl just finds fewer ads.
-
-    So the distance is earned, not assumed. A step that yields new cards is
-    evidence the distance is safe and the pacer grows toward the maximum. A
-    step that yields nothing, after already waiting out the full ceiling, is
-    evidence the opposite: we probably outran the renderer, so the next step
-    is halved. Three consecutive misses drop it to the floor, from which it
-    climbs back one step at a time.
-
-    At the genuine bottom of the results this also halves — harmless, because
-    the caller's quiet-step counter ends the crawl within three steps anyway.
+    Returns 0 (rather than raising) when the page has no scrollable pane yet —
+    a tab that has only just re-navigated has nothing to restore into, and the
+    caller logs the landing depth so a resume that did not take is visible
+    rather than silent.
     """
-
-    def __init__(
-        self,
-        start: int = SCROLL_DISTANCE_PX,
-        maximum: int = SCROLL_DISTANCE_MAX_PX,
-        minimum: int = SCROLL_DISTANCE_MIN_PX,
-    ):
-        self.distance = start
-        self.maximum = maximum
-        self.minimum = minimum
-        self._misses = 0
-        self._growth = 0
-
-    def reward(self, new_cards: int) -> int:
-        """Report the last step's yield; get the distance for the next one."""
-        if new_cards > 0:
-            self._misses = 0
-            # Geometric growth, capped — doubles within ~3 consecutive hits.
-            self._growth += 1
-            if self._growth >= 2:
-                self.distance = min(self.maximum, int(self.distance * 1.3))
-                self._growth = 0
-        else:
-            self._misses += 1
-            self._growth = 0
-            divisor = 1 if self._misses < 2 else 2
-            self.distance = max(self.minimum, int(self.distance / divisor))
-        return self.distance
-
-    def stats(self) -> dict:
-        return {"distance": self.distance, "misses": self._misses}
+    if depth <= 0:
+        return 0
+    try:
+        return int(await page.evaluate(SCROLL_PANE_TO_JS, [depth]) or 0)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("⚠️ Could not restore scroll depth to %d: %s", depth, exc)
+        return 0
 
 
 async def collect_page_html(page: Page, tag: str = "results") -> str:

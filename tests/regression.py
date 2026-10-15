@@ -249,11 +249,16 @@ def test_scraper():
     async def estimate(page):
         return 40
 
-    async def extract(page, source_keyword=None, seen_ids=None, seen_fingerprints=None):
+    async def extract(page, source_keyword=None, seen_ids=None, seen_fingerprints=None,
+                      encountered=None):
         seen = seen_ids if seen_ids is not None else set()
         prints = seen_fingerprints if seen_fingerprints is not None else set()
         out = []
         for i in POPULAR + [f"u_{source_keyword}_{n}" for n in range(2)]:
+            # Progress counts every card on screen, known or not — same rule the
+            # real extractor uses for its `encountered` set.
+            if encountered is not None:
+                encountered.add(i)
             if i in seen:
                 continue
             seen.add(i)
@@ -306,38 +311,22 @@ def test_scraper():
         for n, f in saved.items():
             setattr(sm, n, f)
 
-    # The scroll pacer is the guard against silent data loss. Meta's results
-    # list is virtualised, so a step that jumps further than the renderer can
-    # keep up with skips cards — and skipping cards looks exactly like "this
-    # keyword had few results". The only evidence is the distance backing off
-    # after a step that yielded nothing.
-    print("\n[10b] the scroll pacer backs off instead of skipping cards")
-    from modules.scraper.search import (
-        SCROLL_DISTANCE_MAX_PX,
-        SCROLL_DISTANCE_MIN_PX,
-        ScrollPacer,
-    )
+    # The scroll distance is the one thing that can silently lose ads. Meta's
+    # results list is virtualised, so a jump larger than the renderer can keep
+    # up with skips cards that were rendered and never handed to us — and a
+    # skipped card is indistinguishable from a card that was never there. The
+    # old pacer grew 30% per productive step up to 6000px to save round trips;
+    # growth is exactly what could skip, so the distance is now fixed. Every
+    # scroll in a crawl must be identical, whatever the last step returned.
+    print("\n[10b] the scroll step is fixed, so no scroll can skip past cards")
+    from modules.scraper.search import SCROLL_DISTANCE_PX
 
-    p = ScrollPacer()
-    for _ in range(6):
-        p.reward(4)                       # healthy steps
-    grown = p.distance
-    check("a yielding crawl grows the distance", grown > 4000, f"{grown}px")
-
-    for _ in range(4):
-        p.reward(0)                       # we outran the renderer
-    check("repeated misses back off to the floor", p.distance == SCROLL_DISTANCE_MIN_PX,
-          f"{p.distance}px")
-
-    for _ in range(8):
-        p.reward(3)                       # recovery
-    check("it climbs back after recovery", p.distance > SCROLL_DISTANCE_MIN_PX,
-          f"{p.distance}px")
-    check("it never exceeds the ceiling", p.distance <= SCROLL_DISTANCE_MAX_PX,
-          f"{p.distance}px")
-
-    check("the floor is a real floor",
-          ScrollPacer().reward(0) >= SCROLL_DISTANCE_MIN_PX // 2)
+    check("the distance is conservative", 0 < SCROLL_DISTANCE_PX <= 2000,
+          f"{SCROLL_DISTANCE_PX}px")
+    check("every scroll in the sequential crawl used the same distance",
+          len(set(scrolls)) == 1, f"distances={sorted(set(scrolls))}")
+    check("and it is the one constant", set(scrolls) <= {SCROLL_DISTANCE_PX},
+          f"{sorted(set(scrolls))} vs {SCROLL_DISTANCE_PX}")
 
     # One creative, five Library IDs. Real case: Meta issues an id per platform,
     # so a single ad run across Facebook/Instagram/Messenger/Threads/Audience
@@ -424,20 +413,39 @@ def test_scraper():
 
     stuck_calls = {"n": 0}
 
-    async def stuck_scroll(page, distance=4000, baseline=None, ceiling_ms=1500):
+    async def stuck_scroll(page, distance=1800, baseline=None, ceiling_ms=1500):
         stuck_calls["n"] += 1
         # Moved the first two times, then the pane stopped responding entirely.
         if stuck_calls["n"] > 2:
             return {"waited_ms": 0, "grew": False, "count": baseline, "moved": False}
         return {"waited_ms": 100, "grew": True, "count": (baseline or 0) + 5, "moved": True}
 
-    async def no_ads(page, source_keyword, seen_ids=None, seen_fingerprints=None):
+    async def no_ads(page, source_keyword, seen_ids=None, seen_fingerprints=None,
+                      encountered=None):
         return []
+
+    class StuckPage:
+        """A tab that reloads cleanly but whose pane never recovers."""
+
+        def __init__(self):
+            self.reloads = 0
+
+        async def reload(self, wait_until=None):
+            self.reloads += 1
+
+        async def wait_for_timeout(self, ms):
+            return None
+
+        async def evaluate(self, script, arg=None):
+            # The pane cannot be restored — report landing at the top.
+            return 0
+
+    stuck_page = StuckPage()
 
     saved_s = {n: getattr(sm2, n) for n in (
         "scroll_step", "extract_ads_from_page", "empty_results",
         "read_results_estimate", "search_keyword", "apply_filters",
-        "collect_page_html",
+        "collect_page_html", "scroll_depth", "restore_scroll_depth",
     )}
     sm2.scroll_step = stuck_scroll
     sm2.extract_ads_from_page = no_ads
@@ -446,10 +454,12 @@ def test_scraper():
     sm2.search_keyword = lambda *a, **k: _truthy(None)
     sm2.apply_filters = lambda *a, **k: _truthy(None)
     sm2.collect_page_html = lambda *a, **k: _truthy(None)
+    sm2.scroll_depth = lambda *a, **k: _truthy(9000)
+    sm2.restore_scroll_depth = lambda *a, **k: _truthy(0)
     from modules.scraper.seen import RunSeenIds as _RSI
     try:
         out = asyncio.run(sm2._scrape_keyword(
-            object(), "stuck keyword", SF(category="career_jobs", keywords=["stuck keyword"]),
+            stuck_page, "stuck keyword", SF(category="career_jobs", keywords=["stuck keyword"]),
             None, "career_jobs", _RSI(), None, None, None, set(), set(),
             asyncio.Lock(), is_first_keyword=True,
         ))
@@ -457,6 +467,14 @@ def test_scraper():
         # declaring the bottom after the quiet budget on a dead pane.
         check("a stuck pane is retried, not treated as the bottom",
               stuck_calls["n"] > 3, f"{stuck_calls['n']} scroll attempts")
+        # Every reload resets the dead-end tally, so without a bound on reloads
+        # this loop could never terminate. It has to give up on the TAB, and say
+        # so as a fault rather than as an exhausted keyword.
+        check("it reloads rather than abandoning the keyword",
+              stuck_page.reloads > 0, f"{stuck_page.reloads} reload(s)")
+        check("reloads are bounded, so the crawl terminates",
+              stuck_page.reloads <= sm2.MAX_STUCK_RELOADS,
+              f"{stuck_page.reloads} vs max {sm2.MAX_STUCK_RELOADS}")
     finally:
         for n, f in saved_s.items():
             setattr(sm2, n, f)

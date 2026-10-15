@@ -98,6 +98,7 @@ async def extract_ads_from_page(
     source_keyword: str,
     seen_ids: set[str] | None = None,
     seen_fingerprints: set[str] | None = None,
+    encountered: set[str] | None = None,
 ) -> list[AdRecord]:
     """
     Extract the ad cards currently in the DOM into AdRecords (new ones
@@ -110,6 +111,14 @@ async def extract_ads_from_page(
     Checked AFTER the id, because the id is what decides "already harvested
     this run" and the fingerprint decides "this is the same ad wearing a
     different number".
+
+    `encountered` is filled in place with EVERY ad id this pass laid eyes
+    on — including the ones already in `seen_ids`, and including the ones
+    dropped by the fingerprint collapse. It is the caller's progress
+    counter for one keyword: "how far down this list have we scrolled".
+    It is deliberately not the same thing as the returned records, because
+    reaching the bottom of a list and finding something new in it are two
+    different questions, and only the page can answer the first one.
     """
     records: list[AdRecord] = []
     seen = seen_ids if seen_ids is not None else set()
@@ -127,6 +136,10 @@ async def extract_ads_from_page(
             if not m:
                 continue
             ad_id = m.group(1)
+            # Progress, not harvest: every card on screen counts toward how far
+            # this keyword's list goes, whether or not we have met it before.
+            if encountered is not None:
+                encountered.add(ad_id)
             if ad_id in seen:  # earlier pass already harvested this card
                 continue
             seen.add(ad_id)
