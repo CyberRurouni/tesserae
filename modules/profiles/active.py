@@ -7,13 +7,12 @@ ads the user already parked. Rather than guessing "the newest profile", the
 project carries an explicit pointer — a guess would silently rebind someone's
 verdicts to the wrong profile after an edit.
 
-Bootstrap, when no profile exists yet:
-  1. create one from the current about_us.txt / additional_filters.txt
-  2. name it with the classifier (the first line is the fallback, so a model
-     outage still yields a usable profile)
-  3. create its first request from additional_filters.txt and point at it
-  4. mirror the texts back to the profile files so the existing one-page UI
-     keeps behaving exactly as before
+Bootstrap, when no profile exists yet: create an empty one with an empty
+request and point at it. There is deliberately nothing to read it from —
+this module used to build the first profile out of about_us.txt, and that
+file was a mirror of the store rather than a source, so "first run" and
+"hand-edited the file" were indistinguishable. The About You screen is the
+only place a profile is written now.
 
 Self-heal: a pointer written before requests existed has no request id. That
 is repaired in place rather than rejected, because the profile has exactly one
@@ -24,11 +23,7 @@ import json
 import logging
 from pathlib import Path
 
-from genesis.config import (
-    ABOUT_US_PATH,
-    ADDITIONAL_FILTERS_PATH,
-    PROFILES_DIR,
-)
+from genesis.config import PROFILES_DIR
 
 from . import store
 
@@ -78,6 +73,23 @@ def _owned_request(profile_id: str, request_id: str | None) -> str | None:
     return request_id if request and request.profile_id == profile_id else None
 
 
+def request_for_profile(profile_id: str) -> str | None:
+    """
+    The request a run under THIS profile should judge against.
+
+    Prefers the active pointer's request id, but only when that request really
+    belongs to this profile — a pointer naming another profile's request would
+    scope this run's accept-vs-defer decisions to someone else's wishes.
+    Falls back to the profile's sole request when it has exactly one, which is
+    the unambiguous case, and to None when the answer would be a guess.
+    """
+    data = read_active() or {}
+    if data.get("profile_id") == profile_id:
+        if bound := _owned_request(profile_id, data.get("request_id")):
+            return bound
+    return _owned_request(profile_id, _only_request(profile_id))
+
+
 def active_request_id() -> str | None:
     """
     The request a run should judge against, repairing a stale pointer.
@@ -104,40 +116,29 @@ def active_request_id() -> str | None:
 # ── bootstrap ────────────────────────────────────────────────────────────────
 async def ensure_active_profile() -> store.Profile:
     """
-    The profile a run should use, creating one on first use.
+    The profile a run should use, creating an empty one on first use.
 
-    Idempotent: once the pointer exists this is a file read plus, when the
-    profile text has moved on, one classification call.
+    Idempotent and cheap: once the pointer exists this is a file read. It used
+    to also compare the profile against about_us.txt and, if they differed,
+    overwrite the stored profile — which quietly made a leftover text file the
+    authority over profiles.json. Nothing writes here any more, so there is
+    nothing to compare against.
     """
     existing = active_profile()
     if existing:
         active_request_id()   # repair a pointer written before requests
-        return await sync_with_profile_file(existing)
+        return existing
 
-    about = ABOUT_US_PATH.read_text(encoding="utf-8").strip() if ABOUT_US_PATH.exists() else ""
-    request_text = (
-        ADDITIONAL_FILTERS_PATH.read_text(encoding="utf-8").strip()
-        if ADDITIONAL_FILTERS_PATH.exists()
-        else ""
-    )
-
-    # Name it before creating, so the id reads well rather than being a raw first
-    # line of the profile.
-    about_label = _derive_about(about)
-    try:
-        from .classifier import classify_profile_change
-
-        verdict = await classify_profile_change("", about)
-        if verdict.about:
-            about_label = verdict.about
-    except Exception as exc:  # noqa: BLE001 - bootstrap must survive a model outage
-        logger.warning("⚠️ Could not name the profile (%s) — using the first line", exc)
-
-    profile = store.create_profile(about=about_label, profile_text=about)
-    request_obj = store.create_request(profile.profile_id, request_text)
+    profile = store.create_profile(about="Untitled profile", profile_text="")
+    request_obj = store.create_request(profile.profile_id, "")
     set_active(profile.profile_id, request_obj.request_id)
 
-    logger.info("👨‍👩‍👧 Bootstrapped profile %s (about=%r)", profile.profile_id, profile.about)
+    logger.warning(
+        "👤 No profile exists yet — created an empty one (%s). "
+        "Write your profile on the 'About you' page before searching, or every "
+        "run will judge ads against nothing.",
+        profile.profile_id,
+    )
     return profile
 
 
@@ -157,19 +158,3 @@ def _derive_about(profile_text: str) -> str:
             break
         out.append(word)
     return " ".join(out) or "Untitled profile"
-
-
-async def sync_with_profile_file(profile: store.Profile) -> store.Profile:
-    """
-    Follow about_us.txt if it was edited outside these screens.
-
-    The run pipeline reads the profile files, so if they move the profile has to
-    move with them. Structural classification is NOT done here: that is the
-    screens' job, with the user present to agree to it.
-    """
-    text = ABOUT_US_PATH.read_text(encoding="utf-8").strip() if ABOUT_US_PATH.exists() else ""
-    if text and text != profile.profile_text:
-        profile.profile_text = text
-        store.save_profile(profile)
-        logger.info("📝 Profile text changed outside the screens — followed for %s", profile.profile_id)
-    return profile

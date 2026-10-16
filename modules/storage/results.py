@@ -13,7 +13,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
-from core import ADS_DIR, AdRelevanceVerdict, AdRecord, PROFILE_HASH_TTL
+from core import ADS_DIR, AdRelevanceVerdict, AdRecord
 
 from modules.profiles import deferred as deferred_store
 from modules.profiles import store as profile_store

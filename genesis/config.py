@@ -8,7 +8,6 @@ locations the rest of the country consumes as plain values.
 Nothing else in Tesserae imports `os`, `dotenv`, or `google.genai`.
 """
 
-import hashlib
 import os
 from pathlib import Path
 
@@ -53,10 +52,15 @@ EXPORTS_DIR = BASE_DIR / "exports"        # per-run Excel exports
 PROFILES_DIR = DATA_DIR / "profiles"       # profile + request records
 LEADS_DIR = DATA_DIR / "leads"            # per-profile accepted ads (never pruned)
 
-# User-supplied profile texts (paste/edit these files directly).
-PROFILE_DIR = DATA_DIR / "profile"
-ABOUT_US_PATH = PROFILE_DIR / "about_us.txt"
-ADDITIONAL_FILTERS_PATH = PROFILE_DIR / "additional_filters.txt"
+# Profiles are NOT stored here. They are entities with ids, held in
+# DATA_DIR/profiles/profiles.json (modules.profiles.store) alongside the active
+# pointer. This used to be a pair of text files — about_us.txt and
+# additional_filters.txt — holding the "currently active" profile, which every
+# run then read. Those files were the original storage, superseded when profiles
+# became real objects, and they outlived their usefulness as a mirror that three
+# separate code paths had to keep in sync. Worse, the mirror was authoritative:
+# it overwrote the store at the start of every run, so a stale file silently
+# corrupted the profiles. One store, one writer.
 
 # ============================================================================
 # 🔹 BROWSER (persistent Playwright profile — log in to Google once)
@@ -65,37 +69,6 @@ ADDITIONAL_FILTERS_PATH = PROFILE_DIR / "additional_filters.txt"
 BROWSER_PROFILE_DIR = BASE_DIR / "browser_profile"
 
 # Ensure the storage tree exists on first import.
-for _dir in (ADS_DIR, KEYWORDS_DIR, COVERAGE_DIR, EXPORTS_DIR, BROWSER_PROFILE_DIR, PROFILE_DIR,
+for _dir in (ADS_DIR, KEYWORDS_DIR, COVERAGE_DIR, EXPORTS_DIR, BROWSER_PROFILE_DIR,
              PROFILES_DIR, LEADS_DIR):
     _dir.mkdir(parents=True, exist_ok=True)
-
-
-def read_profile_texts() -> tuple[str, str]:
-    """
-    Read the user's about-us text and additional filters from the profile
-    files (missing files -> empty strings; edit data/profile/*.txt to
-    change what the AI sees).
-    """
-    about = ABOUT_US_PATH.read_text(encoding="utf-8").strip() if ABOUT_US_PATH.exists() else ""
-    filters = ADDITIONAL_FILTERS_PATH.read_text(encoding="utf-8").strip() if ADDITIONAL_FILTERS_PATH.exists() else ""
-    return about, filters
-
-
-# ============================================================================
-# 🔹 PROFILE HASHES — for profile-aware dedup keys
-# ============================================================================
-
-PROFILE_HASH_TTL = 90 * 86400  # 90 days in seconds
-
-def compute_profile_hashes() -> tuple[str, str]:
-    """
-    Compute stable hashes of the user's profile texts.
-
-    Returns (about_hash, filter_hash) — each 16-char hex (sha256[:16]).
-    Empty files -> hash of empty string (deterministic).
-    """
-    about = ABOUT_US_PATH.read_text(encoding="utf-8").strip() if ABOUT_US_PATH.exists() else ""
-    filters = ADDITIONAL_FILTERS_PATH.read_text(encoding="utf-8").strip() if ADDITIONAL_FILTERS_PATH.exists() else ""
-    about_hash = hashlib.sha256(about.encode("utf-8")).hexdigest()[:16]
-    filter_hash = hashlib.sha256(filters.encode("utf-8")).hexdigest()[:16]
-    return about_hash, filter_hash

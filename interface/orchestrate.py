@@ -52,7 +52,7 @@ from interface.select_filters import (
     _save_last_selection,
 )
 from modules.orchestrator import run_orchestrator
-from modules.storage import load_profile
+from modules.storage import resolve_lens
 from core import UserProfile
 
 logger = logging.getLogger(__name__)
@@ -85,8 +85,10 @@ async def _run_with_filters(
     harvest_limit / harvest_keywords: only consulted when the profile is in
     harvest mode. An explicit keyword list overrides the number.
     """
-    about, _ = load_profile()
-    profile = UserProfile(background=about or "(about-us file empty)")
+    # Placeholder only. run_orchestrator overwrites it with the profile store's
+    # own text before anything uses it, so the generator and the judge cannot
+    # disagree — but RunConfig demands a UserProfile, so something goes here.
+    profile = UserProfile(background="")
 
     summary = await run_orchestrator(
         RunConfig(

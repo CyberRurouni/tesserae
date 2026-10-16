@@ -24,8 +24,6 @@ from genesis.config import (
     COVERAGE_DIR,
     EXPORTS_DIR,
     BROWSER_PROFILE_DIR,
-    compute_profile_hashes,
-    PROFILE_HASH_TTL,
 )
 
 ### ==========
@@ -33,7 +31,7 @@ from genesis.config import (
 ### ==========
 
 # ---------- Utilities ----------
-from .utils.redis_utils import verdict_broker, run_state_broker, keyword_broker
+from .utils.redis_utils import run_state_broker, keyword_broker
 from .utils.redis_utils import RedisStreamHandler
 from .utils.redis_utils import safe_redis_operation
 

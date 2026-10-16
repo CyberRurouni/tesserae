@@ -17,8 +17,6 @@ import logging
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from genesis.config import ABOUT_US_PATH, ADDITIONAL_FILTERS_PATH
-
 from modules.profiles import deferred as deferred_store
 from modules.profiles import store
 from modules.profiles.classifier import (
@@ -66,19 +64,6 @@ class ActivateRequest(BaseModel):
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
-def _sync_profile_file(profile: store.Profile, request_text: str) -> None:
-    """
-    Mirror the active profile back into the profile files.
-
-    The run pipeline reads about_us.txt / additional_filters.txt, so the files
-    must track the active profile. Writing them here is what makes the two
-    screens the source of truth rather than a parallel copy.
-    """
-    ABOUT_US_PATH.parent.mkdir(parents=True, exist_ok=True)
-    ABOUT_US_PATH.write_text(profile.profile_text, encoding="utf-8")
-    ADDITIONAL_FILTERS_PATH.write_text(request_text, encoding="utf-8")
-
-
 def _active_request_text(profile_id: str) -> str:
     requests = store.list_requests(profile_id)
     return requests[0].request_text if requests else ""
@@ -175,8 +160,6 @@ async def activate(payload: ActivateRequest):
     if not request_id:
         requests = store.list_requests(payload.profile_id)
         request_id = requests[-1].request_id if requests else None
-    # Never fall back to "": a profile with no request would blank the file.
-    _sync_profile_file(profile, _active_request_text(payload.profile_id) or request_text_of(request_id))
     set_active(payload.profile_id, request_id)
     return {"status": "activated", "profile_id": payload.profile_id,
             "request_id": request_id}
@@ -257,7 +240,6 @@ async def apply_profile(payload: ApplyProfileRequest):
             created.profile_id, request_text_of(current.get("request_id"))
         )
         set_active(created.profile_id, request_obj.request_id)
-        _sync_profile_file(created, request_obj.request_text)
         logger.info("🌱 New profile %s created (about=%r)", created.profile_id, created.about)
         return {"status": "created", "saved": True, "profile": _summary(created),
                 "about": created.about}
@@ -270,8 +252,6 @@ async def apply_profile(payload: ApplyProfileRequest):
         if verdict.about:
             profile.about = verdict.about
         store.save_profile(profile)
-        if current.get("profile_id") == profile.profile_id:
-            _sync_profile_file(profile, _active_request_text(profile.profile_id))
         return {"status": "updated", "saved": True, "profile": _summary(profile)}
 
     # ── structural: a new profile with clean per-profile state ─────────────
@@ -282,7 +262,6 @@ async def apply_profile(payload: ApplyProfileRequest):
         created.profile_id, _active_request_text(profile.profile_id)
     )
     set_active(created.profile_id, request_obj.request_id)
-    _sync_profile_file(created, request_obj.request_text)
     logger.info(
         "🌿 %s: new profile %s (%s) — %s",
         verdict.change, created.profile_id, created.about, verdict.explanation,
@@ -332,20 +311,17 @@ async def apply_request(payload: ApplyRequestRequest):
 
     if existing is None:
         created = store.create_request(payload.profile_id, text)
-        _mirror_if_active(payload.profile_id, text, set_active, read_active)
         return {"status": "created", "saved": True, "request": created.model_dump(mode="json")}
 
     verdict = await classify_request_change(existing.request_text, text)
     if not verdict.new_profile_required:
         existing.request_text = text
         store.save_request(existing)
-        _mirror_if_active(payload.profile_id, text, set_active, read_active)
         return {"status": "updated", "saved": True,
                 "request": existing.model_dump(mode="json"), "change": verdict.change}
 
     created = store.create_request(payload.profile_id, text)
     set_active(payload.profile_id, created.request_id)
-    _mirror_if_active(payload.profile_id, text, set_active, read_active)
     logger.info(
         "🎯 Request %s: new request %s — %s",
         verdict.change, created.request_id, verdict.explanation,
@@ -354,8 +330,3 @@ async def apply_request(payload: ApplyRequestRequest):
             "request": created.model_dump(mode="json"),
             "change": verdict.change, "explanation": verdict.explanation}
 
-
-def _mirror_if_active(profile_id, request_text, set_active, read_active) -> None:
-    profile = store.get_profile(profile_id)
-    if profile and (read_active() or {}).get("profile_id") == profile_id:
-        _sync_profile_file(profile, request_text)

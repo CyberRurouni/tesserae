@@ -267,12 +267,15 @@ class RedisStreamHandler:
 # 🔹 REDIS CONNECTION INSTANCES
 # ============================================================================
 # One database per concern — separate namespaces, separate lifetimes:
-#   DB 1 — verdicts:     ad ids with a FINAL verdict (accepted or
-#                        judged-rejected). Permanent by design; the
-#                        never-process-twice memory.
-#   DB 2 — run state:    progress of long-running scrapes (resume support).
-#   DB 3 — keywords:     keyword cooldowns (TTL — keys expire themselves)
+#   DB 1 — run state:    the four verdict sets, the deferred bucket, lead
+#                        lists, and progress of long-running scrapes.
+#   DB 2 — keywords:     keyword cooldowns (TTL — keys expire themselves)
 #                        + persisted exclusion prompts.
+#
+# There was a third, DB 0-of-3 above these, holding one Redis key per judged ad
+# filed under a hash of the user's profile TEXT. It was replaced when verdicts
+# moved to the four sets: hashing the text meant rewording a profile rotated the
+# key space and made every previously judged ad look unseen again.
 #
 # The DB numbers are overridable because the test suite needs a database of
 # its own. A dedicated category name is NOT isolation: keys like
@@ -288,6 +291,5 @@ def _db(base: int) -> int:
     return base + _REDIS_DB_OFFSET
 
 
-verdict_broker = create_redis_connection(db=_db(1))
-run_state_broker = create_redis_connection(db=_db(2))
-keyword_broker = create_redis_connection(db=_db(3))
+run_state_broker = create_redis_connection(db=_db(1))
+keyword_broker = create_redis_connection(db=_db(2))

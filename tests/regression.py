@@ -1000,6 +1000,98 @@ def test_keyword_lifetime():
     C.delete_keywords(cat, ["lifetime kw"], scope)
 
 
+# ── 11. one profile, one lens ────────────────────────────────────────────────
+def test_single_lens():
+    """
+    The generator and the judge must read the SAME profile.
+
+    They used to read different things: the generator was handed the profile
+    store's text, the judge a separate text file that mirrored it. They agreed
+    only while that mirror was maintained — and when it wasn't, a run hunted
+    for one person and graded the results for another, silently.
+    """
+    print("\n[20] one profile, one lens")
+    from modules.profiles import active as act, store as fstore
+    from modules.storage import resolve_lens
+
+    strong = fstore.create_profile(about="Lens Test Strong", profile_text="STRONG PROFILE TEXT")
+    other = fstore.create_profile(about="Lens Test Other", profile_text="OTHER PROFILE TEXT")
+    req_strong = fstore.create_request(strong.profile_id, "STRONG REQUEST TEXT")
+    req_other = fstore.create_request(other.profile_id, "OTHER REQUEST TEXT")
+
+    # The active pointer names one of them; the caller names the other. An
+    # explicit request must win — guessing here is how a run gets judged against
+    # somebody else's profile.
+    act.set_active(strong.profile_id, req_strong.request_id)
+
+    text, request = resolve_lens(other.profile_id, req_other.request_id)
+    check("an explicitly named profile beats the active pointer",
+          text == "OTHER PROFILE TEXT", text[:40])
+    check("and so does an explicitly named request",
+          request == "OTHER REQUEST TEXT", request[:40])
+
+    text, request = resolve_lens()
+    check("with no names given, the active pointer is used",
+          text == "STRONG PROFILE TEXT", text[:40])
+    check("along with its own request", request == "STRONG REQUEST TEXT", request[:40])
+
+    check("an unknown profile falls back rather than judging nothing",
+          resolve_lens("does_not_exist")[0] == "STRONG PROFILE TEXT")
+
+    # A request belonging to a different profile must never scope this run's
+    # accept-vs-defer decisions to someone else's wishes.
+    text, request = resolve_lens(strong.profile_id, req_other.request_id)
+    check("a cross-profile request is refused",
+          request == "", f"got {request[:30]!r}")
+
+    # ── the file mirror is gone, and cannot come back ──────────────────────
+    print("\n[21] there is no second copy of a profile to disagree with")
+    import genesis.config as genesis_config
+
+    check("no profile text files are defined anywhere",
+          not hasattr(genesis_config, "ABOUT_US_PATH")
+          and not hasattr(genesis_config, "ADDITIONAL_FILTERS_PATH"),
+          "the txt mirror was the original storage, not a cache")
+    check("no hash-of-profile-text helpers remain",
+          not hasattr(genesis_config, "compute_profile_hashes"),
+          "reword a profile and every judged ad used to look unseen again")
+
+    import modules.profiles.active as active_module
+    check("nothing follows a text file into the store",
+          not hasattr(active_module, "sync_with_profile_file"),
+          "the file used to overwrite the store at the start of every run")
+
+    import modules.scraper.seen as seen_module
+    check("the pre-four-sets dedup index is gone",
+          not hasattr(seen_module, "SeenIndex"),
+          "verdicts are filed against a stable profile id now")
+
+    import core
+    check("and the empty verdict database went with it",
+          not hasattr(core, "verdict_broker"),
+          "Redis DB 1 is gone; the sets live in DB 1")
+
+    import interface.profiles_api as papi
+    check("no endpoint writes a profile mirror any more",
+          not hasattr(papi, "_sync_profile_file"))
+
+    # ── and both AI steps read the one resolved field ───────────────────────
+    print("\n[22] the generator and the judge are handed the same text")
+    import modules.orchestrator.main as om
+    import inspect
+
+    src = inspect.getsource(om.run_orchestrator)
+    check("the lens is resolved once, from the store",
+          "resolve_lens(config.profile_id, config.request_id)" in src)
+    check("and written into the run config every consumer reads",
+          "config = config.model_copy(update={\"profile\": UserProfile(background=about)})" in src)
+    judge_src = inspect.getsource(om._search_and_judge)
+    check("the judge reads that same field",
+          "profile_text=config.profile.background" in judge_src)
+    check("the judge reads no text file",
+          "load_profile" not in judge_src and "_load_texts" not in src)
+
+
 def main():
     print("═" * 62)
     print("  Tesserae regression — sandbox:", _SANDBOX)
@@ -1013,6 +1105,7 @@ def main():
     test_corrections()
     test_active_pointer()
     test_keyword_lifetime()
+    test_single_lens()
 
     # Leave nothing behind. Safe because TESSERAE_REDIS_DB_OFFSET moved these
     # databases off the ones the app uses.
@@ -1029,10 +1122,10 @@ def main():
 def _flush_test_redis() -> None:
     """Empty the suite's own Redis databases. Never touches live ones."""
     try:
-        from core.utils.redis_utils import keyword_broker, run_state_broker, verdict_broker
+        from core.utils.redis_utils import keyword_broker, run_state_broker
 
         flushed = 0
-        for broker in (verdict_broker, run_state_broker, keyword_broker):
+        for broker in (run_state_broker, keyword_broker):
             if broker.connection_pool.connection_kwargs.get("db", 0) < 10:
                 continue  # would be a live database — refuse rather than risk it
             flushed += broker.flushdb()

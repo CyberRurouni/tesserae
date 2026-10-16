@@ -92,6 +92,10 @@ export default function ConfigClient() {
         harvest_limit: Number(filters.harvest_limit) || 0,
         // Only an explicit selection is sent; a bare number lets the backend rank.
         harvest_keywords: filters.harvest_keywords?.length ? filters.harvest_keywords : null,
+        // Named explicitly: the backend resolves the lens from this, so the
+        // keyword generator and the judge cannot read different profiles.
+        profile_id: filters.profile_id || null,
+        request_id: filters.request_id || null,
       };
 
       const res = await fetch('/api/runs', {

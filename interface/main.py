@@ -45,7 +45,6 @@ ROOT = Path(__file__).resolve().parent.parent
 LOG_FILE = Path(os.getenv("TESSERAE_LOG_FILE") or (ROOT / "logs" / "tesserae.log"))
 
 DATA_DIR = ROOT / "data" / "ads"
-PROFILE_DIR = ROOT / "data" / "profile"
 
 app = FastAPI(title="Tesserae API", version="1.0.0")
 
@@ -146,8 +145,14 @@ class RunRequest(BaseModel):
 
 
 class ConfigRequest(BaseModel):
-    about_us: Optional[str] = None
-    additional_filters: Optional[str] = None
+    """Only the last-used filter selection is saved here.
+
+    Profile text used to be writable through this endpoint, but it now lives in
+    the profile store and is edited through /api/profiles — one writer, one copy.
+    The fields stayed long after the screens stopped sending them.
+    """
+
+    last_selection: Optional[dict] = None
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -523,27 +528,25 @@ async def get_run_status(run_id: str):
 
 @app.get("/api/config")
 async def get_config():
-    """Profile text plus the last saved filter selection."""
+    """The active profile's texts plus the last saved filter selection."""
     from interface.select_filters import _load_last_selection
-    from modules.storage import load_profile
+    from modules.storage import resolve_lens
 
-    about_us, additional_filters = load_profile()
+    profile_text, request_text = resolve_lens()
     return {
-        "about_us": about_us,
-        "additional_filters": additional_filters,
+        "profile_text": profile_text,
+        "request_text": request_text,
         "last_selection": _load_last_selection(),
     }
 
 
 @app.post("/api/config")
 async def save_config(config: ConfigRequest):
-    """Persist the About You / What Are You Looking For answers."""
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    """Persist the last used filter selection. Profile text lives in /api/profiles."""
+    if config.last_selection is not None:
+        from interface.select_filters import _save_last_selection
 
-    if config.about_us is not None:
-        (PROFILE_DIR / "about_us.txt").write_text(config.about_us, encoding="utf-8")
-    if config.additional_filters is not None:
-        (PROFILE_DIR / "additional_filters.txt").write_text(config.additional_filters, encoding="utf-8")
+        _save_last_selection(config.last_selection)
 
     return {"status": "saved"}
 

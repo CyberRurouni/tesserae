@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/Card';
@@ -57,6 +58,11 @@ const INITIAL = {
   // explicit list that overrides the number.
   harvest_limit: 20,
   harvest_keywords: [],
+  // Which profile and request this run is for. Sent explicitly so the backend
+  // never has to infer it, and so the generator and the judge read the same
+  // profile instead of one of them reading a stale mirror of the other.
+  profile_id: null,
+  request_id: null,
   heuristic_patterns: {
     require_ad_text_patterns: [],
     require_any_ad_text_patterns: [],
@@ -295,7 +301,45 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
   // the form remounts from the draft instead of from the last run's settings.
   useEffect(() => {
     writeDraft(formData);
-  }, [formData]);
+  }, [formData, lens]);
+
+  // Resolve the active lens once, so the run names it explicitly instead of
+  // letting the backend guess which profile is current.
+  const [lens, setLens] = useState(null);
+  const [lensError, setLensError] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+    fetch('/api/profiles', { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((body) => {
+        if (!active) return;
+        setLens({
+          profile_id: body.active_profile_id || null,
+          request_id: body.active_request_id || null,
+          about: (body.profiles || []).find(
+            (p) => p.profile_id === body.active_profile_id
+          )?.about,
+          hasText: (body.profiles || []).some(
+            (p) => p.profile_id === body.active_profile_id && (p.profile_text || '').trim()
+          ),
+        });
+      })
+      .catch((err) => active && setLensError(err.message));
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Keep the form's copy in step with what the backend will actually use.
+  useEffect(() => {
+    if (!lens) return;
+    setFormData((prev) =>
+      prev.profile_id === lens.profile_id && prev.request_id === lens.request_id
+        ? prev
+        : { ...prev, profile_id: lens.profile_id, request_id: lens.request_id }
+    );
+  }, [lens]);
 
   const discardDraft = useCallback(() => {
     clearDraft();
@@ -345,12 +389,13 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
   const validate = useCallback(() => {
     const next = {};
     if (!formData.platforms.length) next.platforms = 'Choose at least one platform, or select All.';
+    if (lens && !lens.hasText) next.profile = 'Write your profile before searching — otherwise every ad is judged against nothing.';
     if (!formData.keywords.length && formData.run_mode === 'existing') {
       next.keywords = 'Add at least one keyword, or switch to AI keyword generation.';
     }
     setErrors(next);
     return Object.keys(next).length === 0;
-  }, [formData]);
+  }, [formData, lens]);
 
   const handleStart = useCallback(async () => {
     if (!validate()) {
@@ -383,6 +428,31 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
       </CardHeader>
 
       <CardContent className="space-y-4">
+        {lens && (
+          <Section
+            title="Profile this search runs under"
+            hint="The keyword generator and the ad judge both read this profile, so they can never describe two different people."
+            error={!!errors.profile}
+          >
+            <div className="space-y-2">
+              <p className="text-sm text-foreground">
+                {lens.about || 'Untitled profile'}
+              </p>
+              <Link href="/about" className="text-xs font-semibold text-primary hover:underline">
+                Change profile on the About you page →
+              </Link>
+              {lensError && (
+                <p className="text-xs text-destructive">Could not load your profile: {lensError}</p>
+              )}
+              {errors.profile && (
+                <p className="text-sm font-medium text-destructive" role="alert">
+                  {errors.profile}
+                </p>
+              )}
+            </div>
+          </Section>
+        )}
+
         <Section title="Category" hint="The only category Tesserae searches today.">
           <Select aria-label="Category" className="opacity-60" value="career_jobs" disabled onChange={() => {}} options={[{ value: 'career_jobs', label: 'Career & Job Opportunities' }]} />
         </Section>

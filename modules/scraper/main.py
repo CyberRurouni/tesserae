@@ -170,7 +170,7 @@ async def run_scrape(
     """
     Full scrape pass: for each keyword, search the library, extract ads,
     apply heuristics, and return candidates that have no FINAL verdict
-    yet. Marking happens only after the AI checkpoint — see SeenIndex.
+    yet. Marking happens only after the AI checkpoint — see modules.verdicts.
     No AI involved in this city.
 
     Browser ownership: pass `context` to reuse an already-open browser

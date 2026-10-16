@@ -7,15 +7,20 @@ workers on different keywords can meet the same ad and only harvest it once.
 
 It is deliberately dumb. "Which verdicts already exist for this profile?" is a
 different question with a different home — see modules/verdicts.py.
+
+This file used to also carry SeenIndex, the original dedup: one Redis key per
+ad, filed under a namespace built from hashes of the user's profile TEXT. That
+meant rewording your profile rotated the key space and every ad you had already
+judged looked unseen again — you paid to re-scrape and re-judge the same ads
+after fixing a typo. Verdicts are now filed against a stable profile id in
+modules/verdicts.py, which is why nothing here needs to know what a profile is.
 """
 
 import logging
 
 from core import (
-    compute_profile_hashes,
     run_state_broker,
     safe_redis_operation,
-    verdict_broker,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,86 +35,6 @@ RUN_SEEN_TTL_SECONDS = 8 * 3600
 # Redis SCANN hints — page through the namespace without blocking the server.
 _SCAN_COUNT = 500
 
-
-def seen_ad_key(category: str, ad_id: str, about_hash: str, filter_hash: str) -> str:
-    return f"{SEEN_AD_PREFIX}:{category}:{about_hash}:{filter_hash}:{ad_id}"
-
-
-def seen_ad_pattern(category: str, about_hash: str, filter_hash: str) -> str:
-    """Match every verdict key in one category+profile namespace."""
-    return f"{SEEN_AD_PREFIX}:{category}:{about_hash}:{filter_hash}:*"
-
-
-class SeenIndex:
-    """
-    In-memory mirror of the FINAL-verdict namespace for one category+profile.
-
-    The namespace is keyed on hashes of the two profile text files, so editing
-    either one yields an empty mirror — that is the intended behaviour (a
-    changed profile is a changed lens), not a bug to paper over.
-    """
-
-    def __init__(self, category: str, filters=None):
-        self.category = category
-        self.filters = filters
-        about_hash, filter_hash = compute_profile_hashes()
-        self.about_hash = about_hash
-        self.filter_hash = filter_hash
-        self._ids: set[str] = set()
-        self._loaded = False
-
-    # ── loading ────────────────────────────────────────────────────────────
-    def load(self, force: bool = False) -> "SeenIndex":
-        """One SCAN of the namespace instead of one EXISTS per card."""
-        if self._loaded and not force:
-            return self
-        found: set[str] = set()
-        try:
-            for key in verdict_broker.scan_iter(
-                match=seen_ad_pattern(self.category, self.about_hash, self.filter_hash),
-                count=_SCAN_COUNT,
-            ):
-                found.add(key.rsplit(":", 1)[-1])
-        except Exception as exc:  # noqa: BLE001 - never let dedup break a scrape
-            logger.warning("⚠️ Could not preload verdict namespace (%s) — per-card checks stay live", exc)
-            self._loaded = True
-            return self
-        self._ids = found
-        self._loaded = True
-        logger.info(
-            "🧠 Verdict namespace loaded: %d ad(s) already final under this profile",
-            len(found),
-        )
-        return self
-
-    # ── queries ────────────────────────────────────────────────────────────
-    def has(self, ad_id: str) -> bool:
-        """True when this ad already reached a FINAL verdict here."""
-        if not self._loaded:
-            self.load()
-        return ad_id in self._ids
-
-    def __len__(self) -> int:
-        return len(self._ids)
-
-    # ── writes ─────────────────────────────────────────────────────────────
-    def mark(self, ad_id: str, ttl: int | None = None) -> bool:
-        """
-        Record a FINAL verdict: Redis first (source of truth), then the mirror.
-
-        Returns True when this call is what established the verdict, i.e. the
-        same "newly marked" count the run logs have always reported.
-        """
-        if not self._loaded:
-            self.load()
-        was_new = ad_id not in self._ids
-        key = seen_ad_key(self.category, ad_id, self.about_hash, self.filter_hash)
-        if ttl is None:
-            safe_redis_operation(verdict_broker.set, key, 1)
-        else:
-            safe_redis_operation(verdict_broker.set, key, 1, ex=ttl)
-        self._ids.add(ad_id)
-        return was_new
 
 
 class RunSeenIds:

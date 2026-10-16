@@ -36,12 +36,13 @@ from core import (
     PoolReviewRequest,
     PromptTimingRequest,
     RunConfig,
+    UserProfile,
 )
 
 from modules.checkpoints import judge_ad_relevance
 from modules.scraper import browser_session, run_scrape
 from modules.scraper.seen import RunSeenIds
-from modules.storage import record_results
+from modules.storage import record_results, resolve_lens
 
 from . import actors
 from . import collection as coll
@@ -115,32 +116,30 @@ async def run_orchestrator(
         config = config.model_copy(update={"request_id": request_id})
 
     category_id = config.filters.category
-    about, additional_filters = _load_texts()
 
-    # The profile FILE is only a mirror of the active profile, so it is the
-    # wrong source when a run names a profile explicitly — the file would still
-    # hold whichever profile was active last, and the AI would generate keywords
-    # for that one while judging against the requested profile. Resolve from the
-    # profile store whenever we know which profile this run belongs to.
-    if config.profile_id:
-        from modules.profiles import store as profile_store
-
-        profile = profile_store.get_profile(config.profile_id)
-        if profile is not None:
-            if profile.profile_text != about:
-                logger.info(
-                    "🪞 Using profile %r's own text, not the mirrored profile file",
-                    config.profile_id,
-                )
-            about = profile.profile_text
-            requests = profile_store.list_requests(config.profile_id)
-            if config.request_id:
-                for r in requests:
-                    if r.request_id == config.request_id:
-                        additional_filters = r.request_text
-                        break
-            elif requests:
-                additional_filters = requests[0].request_text
+    # ONE lens for the whole run, resolved once from the profile store.
+    #
+    # The keyword generator and the relevance judge used to read different
+    # things: the generator was handed the profile store's text, while the judge
+    # was handed config.profile.background, which came from a separate text file.
+    # They agreed only as long as that file was kept in sync — and when it was
+    # not, a run would hunt for one person and grade the results for another,
+    # with nothing on screen to say so.
+    #
+    # Now both read the same resolved field, so they cannot disagree.
+    about, additional_filters = resolve_lens(config.profile_id, config.request_id)
+    if not about.strip():
+        logger.warning(
+            "⚠️ No profile text resolved — the AI actors have nothing to judge against. "
+            "Write your profile on the 'About you' page."
+        )
+    config = config.model_copy(update={"profile": UserProfile(background=about)})
+    logger.info(
+        "🔎 Lens resolved: profile=%s request=%s (%d chars of profile text)",
+        config.profile_id or "(active)",
+        config.request_id or "(none)",
+        len(about),
+    )
 
     logger.info(
         "🚀 Orchestrator start — category %r, pool limit %d, mode=%s, profile=%s, workers=%d",
@@ -355,11 +354,6 @@ async def run_orchestrator(
                 logger.info("✅ All skills covered — harvest mode for %d day(s)", review.recheck_after_days or 7)
 
 
-def _load_texts() -> tuple[str, str]:
-    from modules.storage import load_profile
-
-    return load_profile()
-
 
 def _category_description(category_id: str) -> str:
     from core import CATEGORIES
@@ -417,10 +411,16 @@ async def _search_and_judge(
             batch_size=config.judge_batch_size,
             max_concurrent=config.judge_max_concurrent,
             additional_filters=additional_filters or None,
-            # The judge reasons in two stages and needs BOTH: about-you defines
-            # the profile (accept vs reject), the additional request only
-            # decides accept vs defer. Without about-you every off-request ad
-            # would look like trash instead of something worth keeping.
+            # The judge reasons in two stages and needs BOTH: the profile
+            # decides accept-vs-reject, the request only decides
+            # accept-vs-defer. Without the profile every off-request ad would
+            # look like trash instead of something worth keeping.
+            #
+            # This is config.profile.background — the SAME field the keyword
+            # generator was handed, resolved once from the profile store at the
+            # top of the run. It used to be a second, independent read of a text
+            # file, which is how the generator and the judge came to describe
+            # two different people.
             profile_text=config.profile.background,
             request_id=config.request_id,
         )
