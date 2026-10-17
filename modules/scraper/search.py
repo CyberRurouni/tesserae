@@ -48,6 +48,21 @@ SCROLL_POLL_MS = 100
 # The ceiling only matters at the end of the results, where nothing is coming
 # and the caller's quiet-step counter is what decides.
 SCROLL_CEILING_MS = 1500
+
+# How long one batch of Meta results may take to arrive, and how often we look.
+#
+# This is the patience the crawler did not have. Meta's ad library loads results
+# lazily: reach the bottom and a spinner appears while the next batch is fetched.
+# The old loop asked "did the page move?" milliseconds later, could not tell a
+# busy page from a finished one, and called it the end. Measured live on
+# 'python developer' (Meta estimates ~1,400 results): 15 scrolls collected 25 ads
+# that way, and 100 ads when we waited — with 12 of those 15 scrolls reporting
+# "stopped moving" while Meta was simply still loading.
+LOAD_WAIT_CEILING_MS = 20_000
+LOAD_POLL_MS = 400
+# A batch that takes longer than this to start is treated as "not coming", so one
+# broken batch costs this much time rather than the whole ceiling.
+LOAD_FIRST_BYTE_MS = 8_000
 # Scroll geometry.
 #
 # ONE fixed distance, every scroll, chosen because Meta's results list is
@@ -152,6 +167,188 @@ SCROLL_PANE_JS = """
   return Math.round(window.scrollY);
 }
 """
+
+# ============================================================================
+# 🔹 "IS MORE COMING?" — the question the crawler never asked
+# ============================================================================
+#
+# Meta lazy-loads. Reach the bottom of a results list and the next batch is
+# fetched on the spot; the page does not move while that happens, so "the page
+# stopped moving" means nothing at all. Measured live, the two signals
+# ALTERNATE and neither is reliable alone:
+#
+#     round 1  spinner, no 'see more'      round 4  'see more', no spinner
+#     round 2  'see more', no spinner      round 5  spinner, no 'see more'
+#     round 3  spinner, no 'see more'      round 6  spinner, no 'see more'
+#
+# In rounds 2 and 4 there was no spinner at all and the page still loaded more.
+# Waiting only for a spinner would have stopped the crawl at 25 ads.
+#
+# Both signals are recognised WITHOUT a Meta class name, which is the whole
+# point. The spinner is a standard accessibility marker:
+#
+#     <span role="progressbar" aria-busy="true">
+#
+# That is not one of the obfuscated class names Meta renames between deploys,
+# so unlike the call-to-action lookup this cannot quietly stop matching.
+#
+# Every signal is only trusted BELOW THE LAST AD. Both fakes exist and both were
+# seen live: a "see more" that just expands truncated body copy sits mid-page
+# (present before we had scrolled at all), and a video ad has its own buffering
+# spinner. Either one, counted anywhere on the page, would hold the crawl open
+# for nothing.
+MORE_COMING_JS = """
+() => {
+  const ID_RE = /Library ID:\\s*\\d+/;
+  const spans = [...document.querySelectorAll('span')]
+    .filter((s) => ID_RE.test(s.textContent || ''));
+  const d = document.scrollingElement || document.documentElement;
+  const atBottom = d.scrollTop >= d.scrollHeight - d.clientHeight - 8;
+  if (!spans.length) {
+    return {spinner: false, see_more: false, atBottom, ads: 0, ready: true};
+  }
+
+  // The ad cards themselves, found exactly the way the extractor finds them:
+  // from a Library-ID span, up to the nearest div holding an _8nsi. Using the
+  // real cards matters — "a div that contains an _8nsi" is also true of the
+  // page wrapper around the whole list, so testing for one that way classes
+  // everything as being inside a card and every signal vanishes.
+  const cards = new Set();
+  for (const s of spans) {
+    for (let n = s; n && n.tagName !== 'BODY'; n = n.parentElement) {
+      if (n.tagName === 'DIV' && n.querySelector('[class*="_8nsi"]')) { cards.add(n); break; }
+    }
+  }
+  let last = cards.size ? [...cards].pop() : spans[spans.length - 1];
+  const floor = last.getBoundingClientRect().bottom;
+
+  const onScreen = (el) => {
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && r.top <= innerHeight && r.bottom >= 0;
+  };
+  // "Below the last ad" decided by real ancestry, not by a pixel margin. A pixel
+  // tolerance is wrong twice over: a video ad's own buffering spinner sits a
+  // few pixels above its card's bottom and slipped through a 40px margin, while
+  // any margin large enough to be safe would swallow in-card controls. A signal
+  // inside an ad card is that ad's business, full stop.
+  const below_the_ads = (el) => {
+    if (!onScreen(el)) return false;
+    for (const c of cards) { if (c === el || c.contains(el)) return false; }
+    return el.getBoundingClientRect().top >= floor - 2;
+  };
+
+  const spinner = [...document.querySelectorAll('[role="progressbar"],[aria-busy="true"]')]
+    .some(below_the_ads);
+
+  const see_more = [...document.querySelectorAll('a,button,[role="button"]')]
+    .some((el) => {
+      if (!below_the_ads(el)) return false;
+      const t = (el.innerText || '').trim().toLowerCase();
+      return t.length > 0 && t.length <= 40
+        && /(see more|load more|show more|next)/.test(t);
+    });
+
+  return {spinner, see_more, atBottom, ads: spans.length, ready: true};
+}
+"""
+
+
+async def more_coming(page: Page) -> dict:
+    """Is Meta still fetching results? Never raises — a bad answer means 'no'.
+
+    Keys: spinner, see_more, atBottom, ads (Library-ID spans on screen).
+    """
+    blank = {"spinner": False, "see_more": False, "atBottom": False,
+             "ads": 0, "ready": False}
+    try:
+        out = await page.evaluate(MORE_COMING_JS)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("⚠️ Could not read the more-coming signals (%s)", exc)
+        return blank
+    # Anything that is not our shape means the page answered something else
+    # entirely, which is the same situation as getting no answer: say nothing is
+    # coming and let the caller's budget decide. Guessing "busy" here would
+    # park the crawl at the ceiling on every step.
+    if not isinstance(out, dict):
+        return blank
+    for key in blank:
+        out.setdefault(key, blank[key])
+    return out
+
+
+async def wait_for_more_ads(
+    page: Page,
+    *,
+    on_poll=None,
+    ceiling_ms: int = LOAD_WAIT_CEILING_MS,
+    poll_ms: int = LOAD_POLL_MS,
+    first_byte_ms: int = LOAD_FIRST_BYTE_MS,
+) -> dict:
+    """
+    Wait while Meta says more is coming. The patience the crawler lacked.
+
+    Returns when EITHER the page delivered (the signals cleared and the card
+    count grew) OR nothing is coming any more (signals cleared, count did not
+    move) OR we ran out of time.
+
+    The two ceilings are not the same thing. `first_byte_ms` bounds how long we
+    believe a *promised* batch can take to begin, so a signal that never turns
+    into ads — a stuck tab, a dead feed — costs 8s rather than 20. `ceiling_ms`
+    bounds the whole wait. Neither raises the quiet-step budget: a batch that
+    never arrives is reported as `grew=False` and the caller's own budget
+    decides what to do, which is the one thing that should decide.
+
+    `on_poll` is awaited between polls so a keyword legitimately waiting on
+    Meta still reports in, and is not mistaken for a wedged run.
+    """
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    first_promise = None
+    baseline = (await more_coming(page)).get("ads", 0)
+
+    while True:
+        state = await more_coming(page)
+        promised = bool(state["spinner"] or state["see_more"])
+        now = loop.time()
+        if promised and first_promise is None:
+            first_promise = now
+        if not promised:
+            first_promise = None
+
+        # Nothing promised, not at the bottom, nothing delivered: the caller
+        # should not have called this at all. Saying so immediately stops a
+        # pointless 20s wait on a healthy page mid-list.
+        if not promised and not state.get("atBottom") and state.get("ads", 0) <= baseline:
+            return {"grew": False, "waited_ms": int((now - started) * 1000),
+                    "ads": state.get("ads", 0), "reason": "nothing_promised"}
+
+        # Delivered: the promise is gone and there is more of the page than
+        # there was. This is the happy path, and it is what the old loop could
+        # not tell apart from silence.
+        if not promised and state.get("ads", 0) > baseline:
+            return {"grew": True, "waited_ms": int((now - started) * 1000),
+                    "ads": state.get("ads", 0), "reason": "loaded"}
+
+        # Nothing promised: we are at the bottom, and the caller should hear
+        # about that as a bottom rather than as a fault.
+        if not promised and state.get("atBottom"):
+            return {"grew": False, "waited_ms": int((now - started) * 1000),
+                    "ads": state.get("ads", 0), "reason": "bottom"}
+
+        # Promised, and nothing after a long wait: the promise is not real.
+        if first_promise is not None and (now - first_promise) * 1000 > first_byte_ms:
+            return {"grew": False, "waited_ms": int((now - started) * 1000),
+                    "ads": state.get("ads", 0), "reason": "promised_but_stalled"}
+        if (now - started) * 1000 > ceiling_ms:
+            return {"grew": False, "waited_ms": int((now - started) * 1000),
+                    "ads": state.get("ads", 0), "reason": "timeout"}
+
+        await page.wait_for_timeout(poll_ms)
+        if on_poll is not None:
+            try:
+                await on_poll()
+            except Exception as exc:  # noqa: BLE001 - heartbeat must not break a crawl
+                logger.debug("⚠️ wait heartbeat failed (%s)", exc)
 
 
 async def _first_visible(page: Page, selector: str, timeout_ms: int = 3000) -> Locator | None:

@@ -25,11 +25,13 @@ from .search import (
     apply_filters,
     collect_page_html,
     empty_results,
+    more_coming,
     read_results_estimate,
     restore_scroll_depth,
     scroll_depth,
     scroll_step,
     search_keyword,
+    wait_for_more_ads,
 )
 
 logger = logging.getLogger(__name__)
@@ -302,12 +304,21 @@ async def _scrape_keyword(
     # rather than guessed at. Tuning a crawl without these means guessing.
     dom_cards: int | None = None
     waited: list[int] = []
+    # Time spent waiting on Meta rather than scrolling. Kept apart from `waited`
+    # so the summary can say which of the two dominated the keyword's wall clock:
+    # these numbers are what explain a crawl that took 14s instead of 2s.
+    waited_total_ms = 0
+    loads_waited = 0
+    # Consecutive steps that ended at the bottom with Meta promising nothing and
+    # delivering nothing. This is how "the list ran out" is told apart from "the
+    # crawl gave up", which the quiet budget on its own cannot do.
+    bottoms_confirmed = 0
     stuck_scrolls = 0
     stuck_reloads = 0
 
     logger.info(
         "%s🎯 Crawl plan: Meta says ~%s results, target %s cards seen, exit after %d dead scroll(s), "
-        "fixed %dpx steps",
+        "fixed %dpx steps, waiting for Meta's lazy loads rather than racing them",
         tag, estimate if estimate is not None else "?", target_unique, quiet_budget,
         SCROLL_DISTANCE_PX,
     )
@@ -369,6 +380,19 @@ async def _scrape_keyword(
             elif reached_target:
                 logger.info("%s✅ %r: %d/%d cards seen, then %d dead scroll(s) — bottom reached",
                             tag, keyword, cards_seen, estimate, quiet_steps)
+            elif bottoms_confirmed >= 2:
+                # We stopped short of the target, but not because the crawl
+                # failed: the page sat at the bottom, promised nothing further,
+                # and handed over nothing further, twice over. Meta's own header
+                # is a rounded guess and it over-states as often as it
+                # under-states — 'python developer' reads ~1,400 and yields 954.
+                # Calling that a failure trains us to ignore the warning, which
+                # is how a real one gets missed.
+                logger.info(
+                    "%s✅ %r: bottom reached at %d card(s) — Meta's header said ~%s, "
+                    "so the list ran out before the target. Not a failure.",
+                    tag, keyword, cards_seen, estimate,
+                )
             else:
                 logger.warning(
                     "%s⚠️  %r: ABORTED after %d dead scroll(s) at %d/%d cards (target was %d). "
@@ -395,6 +419,62 @@ async def _scrape_keyword(
             dom_cards = timing["count"]
         waited.append(timing["waited_ms"])
 
+        # ── patience ──────────────────────────────────────────────────────────
+        # A results page that will not move is usually not stuck, it is busy.
+        # Meta lazy-loads the next batch when you reach the bottom, shows a
+        # spinner or a 'see more' while it fetches, and does not move until the
+        # batch lands. The old loop asked milliseconds later, could not tell
+        # busy from finished, and called it the end of the keyword — measured
+        # live on a keyword Meta estimates ~1,400 results for: 15 scrolls, 25
+        # ads, and 12 of those scrolls reporting 'stopped moving' while Meta was
+        # still handing results out.
+        #
+        # So: ask whether more is promised, and if it is, wait for it. The
+        # budget is not replaced by this and not weakened by it — a promise that
+        # never turns into ads is reported as a stall, and the budget still gets
+        # the last word. All this adds is the difference between "not moving
+        # yet" and "not moving any more".
+        moved = bool(timing.get("moved", True))
+        probe = await more_coming(page)
+        promised = bool(probe.get("spinner") or probe.get("see_more"))
+        load = None
+
+        if promised or not moved:
+
+            async def _beat():
+                """Report in while we wait, so a keyword legitimately waiting on
+                Meta is never mistaken for a wedged run."""
+                if on_step is None:
+                    return
+                try:
+                    await on_step(
+                        keyword=keyword,
+                        cards_seen=len(keyword_cards),
+                        ads_collected=len(keyword_ads),
+                        target=target_unique,
+                        estimate=estimate,
+                        steps=steps,
+                    )
+                except Exception as exc:  # noqa: BLE001 - heartbeat must not break a crawl
+                    logger.debug("⚠️ wait heartbeat failed (%s)", exc)
+
+            load = await wait_for_more_ads(page, on_poll=_beat)
+            waited.append(load["waited_ms"])
+            waited_total_ms += load["waited_ms"]
+            loads_waited += 1
+
+        grew = bool(load and load["grew"])
+        # "At the bottom" is a claim about the PAGE — we are as low as it goes
+        # and it is offering nothing more. It is NOT implied by the wait simply
+        # returning empty-handed: a page we could not even read, or one that is
+        # frozen with nothing to show for it, returns empty-handed too. Reading
+        # that as "bottom" is what would let a dead tab sit there quietly, and it
+        # is why only the explicit reasons count here.
+        bottom = bool(load and load["reason"] == "bottom") or (
+            not promised and bool(probe.get("atBottom"))
+        )
+        stalled = bool(load and load["reason"] in ("promised_but_stalled", "timeout"))
+
         # Liveness. Judging happens once per KEYWORD, so a keyword promising
         # ~880 results is silent for its whole ten minutes — without this tick
         # there is no way to tell a working crawl from a wedged tab, and no way
@@ -412,11 +492,30 @@ async def _scrape_keyword(
             except Exception as exc:  # noqa: BLE001 - reporting must never break a crawl
                 logger.debug("⚠️ step reporting failed (%s)", exc)
 
-        if not timing.get("moved", True):
+        if grew:
+            # Meta kept its promise. The next extraction picks the new cards up,
+            # so the quiet budget starts again and any earlier stuck tally is
+            # forgiven — a page that loads is not a page that is stuck.
+            quiet_steps = 0
+            stuck_scrolls = 0
+            bottoms_confirmed = 0
+            logger.info(
+                "%s⏳ %r: page said more was coming and delivered — %d card(s) now on screen "
+                "(waited %dms)", tag, keyword, load["ads"], load["waited_ms"],
+            )
+        elif stalled or (not moved and not bottom):
+            # Only now is a still page a fault: Meta promised results that never
+            # arrived, or the page stopped responding with nothing to show for
+            # it. Before this, ANY scroll that did not move landed here — which
+            # meant the bottom of a healthy list reloaded the tab and then gave
+            # up on the keyword.
             stuck_scrolls += 1
+            bottoms_confirmed = 0
             logger.warning(
-                "%s🪦 %r: the results pane stopped responding (%d step(s) so far)",
+                "%s🪦 %r: the page stopped responding (%d step(s) so far)%s",
                 tag, keyword, stuck_scrolls,
+                " — Meta promised more and never sent it"
+                if stalled else " — no promise of more, and nothing arrived",
             )
             if stuck_scrolls >= STUCK_SCROLL_LIMIT:
                 stuck_reloads += 1
@@ -464,6 +563,12 @@ async def _scrape_keyword(
                     logger.error("%s💥 %r: reload failed (%s) — ending this keyword",
                                  tag, keyword, exc)
                     break
+        elif bottom:
+            # We are as low as the page goes, it is offering nothing more, and
+            # it handed over nothing this step either. That is the bottom, not a
+            # fault — counted here so the summary can say so honestly when the
+            # list runs out below Meta's estimate.
+            bottoms_confirmed += 1
 
     if not keyword_ads:
         # Nothing matched the selectors — dump the results page so the card
@@ -510,6 +615,13 @@ async def _scrape_keyword(
             "%s⏱️  %r: %d scroll(s) of %dpx, %dms waiting for content (avg %dms)",
             tag, keyword, len(waited), SCROLL_DISTANCE_PX, sum(waited),
             sum(waited) // len(waited),
+        )
+    if loads_waited:
+        # Said plainly, because a crawl that suddenly takes 15s a keyword looks
+        # like a regression and is actually Meta being waited for correctly.
+        logger.info(
+            "%s⏳  %r: waited on Meta %d time(s), %dms of it",
+            tag, keyword, loads_waited, waited_total_ms,
         )
     return fresh
 

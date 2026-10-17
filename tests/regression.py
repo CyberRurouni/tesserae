@@ -1468,6 +1468,129 @@ def test_bulk_reader():
           "excluding _7jy- drops the button on every carousel ad")
 
 
+def test_patience():
+    """
+    A results page that will not move is usually busy, not finished.
+
+    Meta lazy-loads: reach the bottom and the next batch is fetched on the spot,
+    with a spinner or a 'see more' showing while it comes. The page does not
+    move until it lands. The crawler asked milliseconds later, could not tell
+    busy from finished, and called it the end — measured live on a keyword Meta
+    estimates ~1,400 results for: 15 scrolls collected 25 ads that way, and 100
+    when it waited. 12 of those 15 scrolls reported "stopped moving" while Meta
+    was still handing out results.
+
+    These checks pin the two halves of the fix: that the signals are recognised
+    WITHOUT a Meta class name, and that only a real fault reloads the tab.
+    """
+    print("\n[29] a page that is loading is not a page that is finished")
+    import modules.scraper.search as S
+    import modules.scraper.main as sm
+
+    js = S.MORE_COMING_JS
+
+    # ── the signals, and what they must NOT be found by ──────────────────────
+    # The call-to-action lookup died quietly because it hunted a class Meta can
+    # rename. The spinner is marked up with standard accessibility attributes
+    # instead, so it survives a deploy the way the broken selector did not.
+    check("the spinner is found by its accessibility marker, not a Meta class",
+          '[role="progressbar"]' in js and '[aria-busy="true"]' in js)
+    check("and the page-side reader names no obfuscated class for either signal",
+          "x1" not in js and "x2" not in js,
+          "an obfuscated class here would break exactly like the CTA one did")
+    check("'see more' is matched on wording, which Meta does not obfuscate",
+          "see more" in js and "load more" in js)
+    check("both signals are honoured, since live pages show one or the other",
+          js.count("spinner") >= 2 and js.count("see_more") >= 2)
+
+    # ── signals are only trusted below the last ad ───────────────────────────
+    check("a signal inside an ad card is ignored, not counted as more coming",
+          "below_the_ads" in js and "cards" in js,
+          "a video ad's own spinner and an in-ad 'see more' are both real and both false alarms")
+    check("the cards are found the way the extractor finds them",
+          "Library ID" in js and '_8nsi' in js,
+          "testing 'some div contains _8nsi' would match the page wrapper and void every signal")
+
+    # ── a page that answers with nonsense must not park the crawl ───────────
+    class Rude:
+        async def evaluate(self, script, arg=None):
+            return 0  # not our shape at all
+
+        async def wait_for_timeout(self, ms):
+            return None
+
+    got = asyncio.run(S.more_coming(Rude()))
+    check("a page that answers with the wrong shape reports nothing coming",
+          got["spinner"] is False and got["see_more"] is False)
+
+    class Broken:
+        async def evaluate(self, script, arg=None):
+            raise RuntimeError("target closed")
+
+        async def wait_for_timeout(self, ms):
+            return None
+
+    got = asyncio.run(S.more_coming(Broken()))
+    check("a page that will not answer at all reports nothing coming",
+          got["spinner"] is False and got["spinner"] is got["see_more"])
+
+    # ── waiting returns a reason the caller can act on ───────────────────────
+    class Loading:
+        """Promises a batch, delivers it, then goes quiet at the bottom."""
+
+        def __init__(self):
+            self.polls = 0
+
+        async def evaluate(self, script, arg=None):
+            self.polls += 1
+            if self.polls <= 2:
+                return {"spinner": True, "see_more": False, "atBottom": True,
+                        "ads": 20, "ready": True}
+            return {"spinner": False, "see_more": False, "atBottom": True,
+                    "ads": 35, "ready": True}
+
+        async def wait_for_timeout(self, ms):
+            return None
+
+    r = asyncio.run(S.wait_for_more_ads(Loading(), ceiling_ms=5000, poll_ms=1))
+    check("a promised batch that arrives counts as loaded",
+          r["grew"] is True and r["reason"] == "loaded", f"reason={r['reason']}")
+    check("and waiting stops as soon as it lands rather than burning the ceiling",
+          r["waited_ms"] < 5000)
+
+    # A promise that never becomes ads must not be believed forever.
+    class Never:
+        async def evaluate(self, script, arg=None):
+            return {"spinner": True, "see_more": False, "atBottom": True,
+                    "ads": 20, "ready": True}
+
+        async def wait_for_timeout(self, ms):
+            return None
+
+    r = asyncio.run(S.wait_for_more_ads(
+        Never(), ceiling_ms=60_000, poll_ms=1, first_byte_ms=150))
+    check("a promise that never delivers is reported as stalled, not as loaded",
+          r["grew"] is False and r["reason"] == "promised_but_stalled",
+          f"reason={r['reason']}")
+    check("and it gives up on the short clock, not the long one",
+          r["waited_ms"] < 5000, f"{r['waited_ms']}ms")
+
+    # ── only a fault reloads the tab now ─────────────────────────────────────
+    src = inspect.getsource(sm._scrape_keyword)
+    check("the crawl waits on Meta before judging the page",
+          "wait_for_more_ads" in src and "more_coming" in src)
+    check("a scroll that did not move is not, by itself, a fault",
+          "not moved and not bottom" in src,
+          "the bottom of a healthy list used to reload the tab and abandon the keyword")
+    check("a bottom is counted separately from a fault",
+          "bottoms_confirmed" in src)
+    check("and a bottom below Meta's estimate is not reported as a failure",
+          "ran out before the target. Not a failure." in src,
+          "Meta's header over-states often; warning every time trains us to ignore it")
+    check("a real failure is still reported as one",
+          "ABORTED" in src and "promised_but_stalled" in src)
+
+
 def main():
     print("═" * 62)
     print("  Tesserae regression — sandbox:", _SANDBOX)
@@ -1484,6 +1607,7 @@ def main():
     test_single_lens()
     test_cancellation()
     test_bulk_reader()
+    test_patience()
 
     # Leave nothing behind. Safe because TESSERAE_REDIS_DB_OFFSET moved these
     # databases off the ones the app uses.
