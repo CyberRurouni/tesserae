@@ -35,13 +35,6 @@ class MediaType(str, Enum):
     meme = "meme"
 
 
-class DatePreset(str, Enum):
-    any = "any"
-    last_7_days = "last_7_days"
-    last_30_days = "last_30_days"
-    custom = "custom"
-
-
 class SortOrder(str, Enum):
     relevance = "relevance"
     date = "date"
@@ -62,8 +55,16 @@ class ScrapingFilters(BaseModel):
     delivery_status: DeliveryStatus = DeliveryStatus.active
     platforms: list[Platform] = Field(default_factory=list)
     media_type: MediaType = MediaType.all
-    date_preset: DatePreset = DatePreset.any
-    custom_start_date: date | None = None  # only used when date_preset == custom
+    # An explicit date range, as Meta's own "Impressions by date" From/To.
+    # Either side may be omitted for an open-ended range. When set this REPLACES
+    # ad_age_hours, which is the same idea expressed relatively ("last 7 days").
+    #
+    # There used to be a `date_preset` here offering any/last_7_days/last_30_days
+    # plus a `custom` option. It never reached Meta, its only non-redundant
+    # option was not in the UI at all, and every option it did offer duplicated
+    # ad_age_hours — so the Search page showed two identical date dropdowns, the
+    # first of which silently did nothing. Removed rather than left lying.
+    custom_start_date: date | None = None
     custom_end_date: date | None = None
     delivered_to_regions: list[str] = Field(default_factory=list)  # ISO codes, e.g. ["PK"]
     languages: list[str] = Field(default_factory=list)
@@ -71,7 +72,6 @@ class ScrapingFilters(BaseModel):
 
     # --- Tesserae extras (not offered by the Meta UI) ---
     ad_age_hours: int | None = None        # e.g. 168 = less than a week old
-    results_limit_per_keyword: int = 50
 
     # Heuristic backbone: ad text must contain every required pattern (AND),
     # at least one of the any-patterns (OR), and must NOT contain any excluded

@@ -56,7 +56,6 @@ from .schemas import (
     MediaType,
     Platform,
     ScrapingFilters,
-    DatePreset,
     SortOrder,
     KeywordStatus,
     KeywordStats,

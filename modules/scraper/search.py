@@ -431,6 +431,23 @@ def build_search_url(keyword: str, filters: ScrapingFilters) -> str:
         floor = datetime.now(timezone.utc) - timedelta(hours=filters.ad_age_hours)
         params["start_date[min]"] = floor.strftime("%Y-%m-%d")
 
+    # An explicit from/to range wins over ad age.
+    #
+    # Both are Meta's own params — verified live by varying them and reading
+    # Meta's own result count: no dates 200, last 30 days 190, today only 110.
+    # They were previously collected on the Search page, saved, shown back, and
+    # never sent: `date_preset` only ever offered "last 7/30 days", which ad age
+    # already did, and the "custom" option it claimed to support was not in the
+    # dropdown at all. So the Search page showed two identical date dropdowns, the
+    # first of which did nothing.
+    custom_from = getattr(filters, "custom_start_date", None)
+    custom_to = getattr(filters, "custom_end_date", None)
+    if custom_from or custom_to:
+        if custom_from:
+            params["start_date[min]"] = custom_from.isoformat()
+        if custom_to:
+            params["start_date[max]"] = custom_to.isoformat()
+
     return f"{ADS_LIBRARY_URL}?{urlencode(params)}"
 
 
@@ -603,17 +620,51 @@ async def search_keyword(
 
 async def apply_filters(page: Page, filters: ScrapingFilters) -> None:
     """
-    Post-navigation filter staging. Date/ad-age and delivery status are
-    already applied server-side via URL params (build_search_url). The
-    remaining UI controls (platform, media type, advertiser) land in a
-    second pass after live validation.
+    Report what was actually applied. It applies nothing.
+
+    This used to log "Filters applied via URL: ..." unconditionally, which is
+    how a Search page control could sit there looking real, get saved, get
+    displayed back, and then be dropped at URL-build time without anyone
+    noticing: the log said it had been applied.
+
+    So this now builds the same list `build_search_url` does and says plainly
+    what reached Meta and what did not. Anything ignored is named, so a control
+    that does nothing is visible in the log instead of invisible in the UI.
     """
-    logger.info(
-        "🎛️ Filters applied via URL: status=%s, ad_age_hours=%s, regions=%s",
-        filters.delivery_status.value,
-        filters.ad_age_hours,
-        filters.delivered_to_regions or "ALL",
-    )
+    applied = [
+        f"status={filters.delivery_status.value}",
+        f"media={filters.media_type.value}",
+        f"countries={filters.delivered_to_regions or 'ALL'}",
+    ]
+    if filters.languages:
+        applied.append(f"languages={','.join(filters.languages)}")
+    if filters.platforms:
+        applied.append(f"platforms={','.join(p.value for p in filters.platforms)}")
+    if filters.sort_order:
+        applied.append(f"sort={filters.sort_order.value}")
+    if filters.custom_start_date or filters.custom_end_date:
+        applied.append(
+            f"date_range={filters.custom_start_date or 'any'}.."
+            f"{filters.custom_end_date or 'today'}"
+        )
+    elif filters.ad_age_hours is not None:
+        applied.append(f"ad_age={filters.ad_age_hours}h")
+    else:
+        applied.append("date=any")
+
+    ignored = []
+    if getattr(filters, "advertiser", None):
+        ignored.append("advertiser (Meta only offers this through its own "
+                       "dropdown; not sent)")
+    if getattr(filters, "advertiser_category", None):
+        ignored.append("advertiser_category (ad category is fixed to 'all ads' "
+                       "for lead generation)")
+
+    logger.info("🎛️ Applied to the Meta URL: %s", "; ".join(applied))
+    if ignored:
+        logger.warning(
+            "⚠️  NOT sent to Meta, so it had no effect: %s", "; ".join(ignored),
+        )
 
 
 # The heading of Meta's zero-results empty state (stable English text).

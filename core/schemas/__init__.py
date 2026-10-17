@@ -6,7 +6,6 @@ from .filters import (
     MediaType,
     Platform,
     ScrapingFilters,
-    DatePreset,
     SortOrder,
 )
 from .keyword import (
@@ -46,7 +45,6 @@ __all__ = [
     "MediaType",
     "Platform",
     "ScrapingFilters",
-    "DatePreset",
     "SortOrder",
     "KeywordStatus",
     "KeywordStats",

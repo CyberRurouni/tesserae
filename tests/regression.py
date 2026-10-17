@@ -1987,6 +1987,145 @@ def test_live_result_store():
           "the file does not exist until the run ends, so this is the only source")
 
 
+def _effect_window(source: str, needle: str, span: int = 4) -> str:
+    """The few lines around `needle` — enough to see a hook's dependency array."""
+    lines = source.splitlines()
+    for i, line in enumerate(lines):
+        if needle in line:
+            return "\n".join(lines[i:i + span])
+    return ""
+
+
+def test_filters_reach_meta():
+    """
+    The Search page offered filters that were collected, saved, shown back, and
+    then thrown away at URL-build time — with no error anywhere.
+
+    The worst of it: two date dropdowns sat next to each other offering the same
+    three options. "Posted within" did nothing. "Ad age" worked. Pick "Last 7 days"
+    from the top and you got everything; pick the identical option below and it
+    filtered. And `date_preset`'s one unique option — a custom range — was not in
+    its dropdown at all, so it had nothing to offer that ad age did not.
+
+    Both `start_date[min]` and `start_date[max]` are Meta's own params, verified
+    live by varying them and reading Meta's own count: unfiltered 200, last 7 days
+    190, today only 110.
+    """
+    print("\n[34] the filters you pick actually reach Meta")
+    import urllib.parse
+    from datetime import date
+
+    from core import ScrapingFilters
+    import modules.scraper.search as S
+
+    def dates(**kw):
+        q = urllib.parse.parse_qs(
+            S.build_search_url("kw", ScrapingFilters(category="career_jobs", **kw)
+                               ).split("?", 1)[1], keep_blank_values=True)
+        return q.get("start_date[min]"), q.get("start_date[max]")
+
+    check("with no date filter, no date params are sent",
+          dates() == (None, None))
+    check("ad age still works and is the only relative control",
+          dates(ad_age_hours=168)[0] is not None)
+    check("a 'posted from' date reaches Meta",
+          dates(custom_start_date=date(2026, 9, 1))[0] == ["2026-09-01"])
+    check("a 'posted to' date reaches Meta too",
+          dates(custom_end_date=date(2026, 9, 30))[1] == ["2026-09-30"])
+    lo, hi = dates(custom_start_date=date(2026, 9, 1), custom_end_date=date(2026, 9, 30))
+    check("both ends travel as one range", lo == ["2026-09-01"] and hi == ["2026-09-30"])
+    check("and an open-ended range is allowed (one side may be blank)",
+          dates(custom_start_date=date(2026, 9, 1))[1] is None)
+    check("an explicit range overrides ad age, which is the same filter twice",
+          dates(ad_age_hours=168, custom_start_date=date(2026, 9, 1))[0] == ["2026-09-01"])
+    check("even when the range is entirely in the past",
+          dates(ad_age_hours=24, custom_start_date=date(2020, 1, 1),
+                custom_end_date=date(2020, 3, 1))[0] == ["2020-01-01"])
+
+    # ── the dead controls are gone, not merely hidden ────────────────────────
+    fields = set(ScrapingFilters.model_fields)
+    check("date_preset is gone from the schema",
+          "date_preset" not in fields,
+          "kept in a saved file, it would be a filter nobody can see or change")
+    check("results_limit_per_keyword is gone from the schema",
+          "results_limit_per_keyword" not in fields,
+          "no UI for it, never applied")
+    check("the custom range is a real schema field",
+          {"custom_start_date", "custom_end_date"} <= fields)
+
+    fe = Path(__file__).resolve().parents[1] / "frontend"
+    builder = (fe / "components" / "config" / "FilterBuilder.js").read_text()
+    # Match the code, not the prose: the replacement block explains what it
+    # replaced, and a comment mentioning the old dropdown is not the dropdown.
+    check("the Search page no longer offers the dead 'Posted within' dropdown",
+          "DATE_OPTIONS" not in builder
+          and "update('date_preset'" not in builder
+          and 'label="Posted within"' not in builder)
+    check("and offers a real from/to range instead",
+          "custom_start_date" in builder and "custom_end_date" in builder)
+    check("only one date control remains, so the two cannot disagree",
+          builder.count('update(\'ad_age_hours\'') == 1)
+
+    # select_filters.py still NAMES both on purpose — in the map of removed
+    # fields, so a stale saved selection is stripped and reported. What must not
+    # survive is actual USE of them anywhere.
+    for stale in ("date_preset", "results_limit_per_keyword", "DatePreset"):
+        uses = []
+        for f in ("interface/main.py", "interface/orchestrate.py",
+                  "interface/select_filters.py", "frontend/lib/draft.js",
+                  "frontend/components/config/FilterBuilder.js"):
+            path = Path(f)
+            if not path.exists():
+                continue
+            body = path.read_text()
+            # Drop comments and docstrings before looking for real references.
+            code = "\n".join(
+                ln for ln in body.splitlines()
+                if not ln.strip().startswith("#")
+                and '"date_preset="' not in ln and "'date_preset':" not in ln
+            )
+            for token in (f"{stale}=", f"{stale} =", f".{stale}", f"'{stale}'", f'"{stale}"'):
+                if token in code and "_REMOVED_FIELDS" not in code.split(token)[0][-200:]:
+                    uses.append(f"{f}:{token}")
+                    break
+        check(f"{stale} is no longer used anywhere", not uses,
+              f"still referenced in {uses}" if uses else "")
+
+    # ── and the log stops claiming success it did not have ──────────────────
+    src = inspect.getsource(S.apply_filters)
+    check("apply_filters says what was applied", "Applied to the Meta URL" in src)
+    check("and names anything it did not send", "NOT sent to Meta" in src)
+    # The old line survives only inside the docstring explaining it was a lie.
+    check("it no longer claims to apply filters it never touched",
+          '"🎛️ Filters applied via URL' not in src
+          and "Applied to the Meta URL" in src)
+    check("a stale key in a saved selection is stripped, not silently kept",
+          "_REMOVED_FIELDS" in Path("interface/select_filters.py").read_text())
+
+    # ── the Search page must actually render ────────────────────────────────
+    # Found while verifying the filters above: the whole page was blank. A
+    # useEffect dependency array read `lens` four lines above its `const`, and a
+    # dependency array is evaluated during render — so it threw "Cannot access
+    # 'lens' before initialization" and the error boundary took the page down.
+    # Silently, on every load, with no build error and no lint error.
+    #
+    # Cheap to guard: the first time a component mentions a state variable must
+    # be its declaration, never a use.
+    src = builder
+    first_lens = next((i for i, ln in enumerate(src.splitlines())
+                       if "lens" in ln and not ln.strip().startswith("//")), None)
+    declared = next((i for i, ln in enumerate(src.splitlines())
+                     if "const [lens" in ln), None)
+    check("the Search page's lens is declared before it is used",
+          declared is not None and first_lens == declared,
+          "a dep array read it before its const, blanking the page on every load"
+          if declared is None or first_lens != declared else "")
+    check("and the page no longer relies on the lens to persist the draft",
+          "writeDraft(formData)" in src
+          and "[formData, lens]);" not in _effect_window(src, "writeDraft(formData)"),
+          "nothing this effect touches comes from the lens")
+
+
 def main():
     print("═" * 62)
     print("  Tesserae regression — sandbox:", _SANDBOX)
@@ -2008,6 +2147,7 @@ def main():
     test_streaming_harvest()
     test_progress_is_visible()
     test_live_result_store()
+    test_filters_reach_meta()
 
     # Leave nothing behind. Safe because TESSERAE_REDIS_DB_OFFSET moved these
     # databases off the ones the app uses.

@@ -20,7 +20,7 @@ import socket
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import date, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -159,7 +159,11 @@ class RunRequest(BaseModel):
     delivery_status: str = "active"
     platforms: Optional[Union[list[str], str]] = None
     media_type: str = "all"
-    date_preset: str = "any"
+    # An explicit from/to date range. Either may be omitted. When set it
+    # replaces ad_age — same idea, but anchored to fixed dates instead of
+    # "the last N hours". Both reach Meta as start_date[min]/[max].
+    custom_start_date: Optional[str] = None   # YYYY-MM-DD
+    custom_end_date: Optional[str] = None
     keywords: Optional[Union[list[str], str]] = None
     ad_age: Optional[Union[int, str]] = None
     regions: Optional[Union[list[str], str]] = "ALL"
@@ -256,6 +260,29 @@ def _find_run_file(run_id: str) -> Path | None:
     return None
 
 
+def _parse_iso_date(value: str | None, field: str) -> date | None:
+    """
+    Turn "2026-09-01" into a date, or refuse it clearly.
+
+    A date that is not a date must not reach `build_search_url` and fail later
+    with a traceback a long way from the mistake — this is the same shape of
+    problem as the unvalidated category that raised KeyError inside the
+    orchestrator. Blank means "no bound", which is legitimate: either side of the
+    range may be open.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text)
+    except ValueError as exc:
+        raise HTTPException(
+            400, f"{field} must be a date as YYYY-MM-DD, not {text!r}",
+        ) from exc
+
+
 def _build_filters(request: RunRequest):
     """Build ScrapingFilters from a request without any interactive prompts.
 
@@ -293,7 +320,8 @@ def _build_filters(request: RunRequest):
         delivery_status=request.delivery_status,
         platforms=request.platforms,
         media_type=request.media_type,
-        date_preset=request.date_preset,
+        custom_start_date=_parse_iso_date(request.custom_start_date, "custom_start_date"),
+        custom_end_date=_parse_iso_date(request.custom_end_date, "custom_end_date"),
         keywords=request.keywords,
         ad_age=request.ad_age,
         regions=regions,

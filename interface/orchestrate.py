@@ -42,7 +42,6 @@ from core import (
     DeliveryStatus,
     Platform,
     MediaType,
-    DatePreset,
     SortOrder,
     RunConfig,
 )
@@ -221,7 +220,6 @@ def main(argv: list | None = None) -> None:
         args.delivery_status,
         args.platforms,
         args.media_type,
-        args.date_preset,
         args.keywords,
         args.ad_age,
         args.regions,
@@ -239,7 +237,6 @@ def main(argv: list | None = None) -> None:
             delivery_status=args.delivery_status or (last.get("delivery_status") if last else None),
             platforms=args.platforms or (last.get("platforms") if last else None),
             media_type=args.media_type or (last.get("media_type") if last else None),
-            date_preset=args.date_preset or (last.get("date_preset") if last else None),
             keywords=args.keywords or (last.get("keywords") if last else None),
             ad_age=args.ad_age if args.ad_age is not None else (last.get("ad_age_hours") if last else None),
             regions=args.regions or (last.get("delivered_to_regions") if last else None),
@@ -268,7 +265,6 @@ def main(argv: list | None = None) -> None:
                     delivery_status=last.get("delivery_status"),
                     platforms=last.get("platforms"),
                     media_type=last.get("media_type"),
-                    date_preset=last.get("date_preset"),
                     keywords=last.get("keywords"),
                     ad_age=last.get("ad_age_hours"),
                     regions=last.get("delivered_to_regions"),
@@ -289,7 +285,6 @@ def main(argv: list | None = None) -> None:
         "delivery_status": filters.delivery_status,
         "platforms": filters.platforms,
         "media_type": filters.media_type,
-        "date_preset": filters.date_preset,
         "keywords": filters.keywords,
         "ad_age_hours": filters.ad_age_hours,
         "delivered_to_regions": filters.delivered_to_regions,
@@ -311,7 +306,6 @@ def main(argv: list | None = None) -> None:
             "delivery_status": filters.delivery_status,
             "platforms": filters.platforms,
             "media_type": filters.media_type,
-            "date_preset": filters.date_preset,
             "keywords": filters.keywords,
             "ad_age_hours": filters.ad_age_hours,
             "delivered_to_regions": filters.delivered_to_regions,
@@ -334,7 +328,7 @@ def main(argv: list | None = None) -> None:
         print(f"  Delivery status: {filters.delivery_status}")
         print(f"  Platforms:       {', '.join(filters.platforms) if filters.platforms else 'all'}")
         print(f"  Media type:      {filters.media_type}")
-        print(f"  Date preset:     {filters.date_preset}")
+        print(f"  Date range:      {filters.custom_start_date or 'any'} .. {filters.custom_end_date or 'today'}")
         print(f"  Ad age hours:    {filters.ad_age_hours or 'none'}")
         print(f"  Regions:         {', '.join(filters.delivered_to_regions) if filters.delivered_to_regions else 'ALL'}")
         print(f"  Languages:       {', '.join(filters.languages) if filters.languages else 'all'}")

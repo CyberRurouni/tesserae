@@ -30,7 +30,6 @@ from core import (
     DeliveryStatus,
     Platform,
     MediaType,
-    DatePreset,
     SortOrder,
 )
 
@@ -42,12 +41,42 @@ LAST_SELECTION_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), ".tesserae_filters.json"
 )
 
+
+def _parse_date_arg(value, label: str):
+    """A --date-from/--date-to value as a date. Blank means "no bound"."""
+    if not value:
+        return None
+    text = str(value).strip()
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        raise SystemExit(f"  --{label} must be YYYY-MM-DD, not {text!r}")
+# Filters that no longer exist, mapped to what replaced them. A saved selection
+# file can outlive the field it holds, and a key the backend does not understand
+# is worse than no key: the frontend renders it, nobody can change it, and it
+# silently does nothing. So they are stripped on read and said out loud.
+_REMOVED_FIELDS = {
+    "date_preset": "use Ad age, or an explicit Posted from/Posted to range",
+    "results_limit_per_keyword": "removed — it was never applied",
+}
+
+
 def _load_last_selection() -> dict | None:
     """Load last filter selection from disk, if it exists."""
     try:
         if os.path.exists(LAST_SELECTION_PATH):
             with open(LAST_SELECTION_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            if isinstance(data, dict):
+                stale = [k for k in _REMOVED_FIELDS if k in data]
+                for key in stale:
+                    data.pop(key, None)
+                if stale:
+                    logger.warning(
+                        "Ignored removed filter(s) in the saved selection: %s",
+                        ", ".join(f"{k} ({_REMOVED_FIELDS[k]})" for k in stale),
+                    )
+            return data
     except Exception as e:
         logger.warning("Failed to load last selection: %s", e)
     return None
@@ -79,9 +108,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--media-type", type=str, default=None,
                         choices=["all", "image", "video", "meme"],
                         help="Media type (default: last used or all)")
-    parser.add_argument("--date-preset", type=str, default=None,
-                        choices=["any", "last_7_days", "last_30_days", "custom"],
-                        help="Date preset (default: last used or any)")
+    parser.add_argument("--date-from", type=str, default=None,
+                        help="Earliest ad date to include, YYYY-MM-DD "
+                             "(default: last used, or no lower bound)")
+    parser.add_argument("--date-to", type=str, default=None,
+                        help="Latest ad date to include, YYYY-MM-DD "
+                             "(default: last used, or no upper bound)")
     parser.add_argument("--keywords", type=str, default=None,
                         help="Space-separated keywords (overrides generation)")
     parser.add_argument("--ad-age", type=int, default=None,
@@ -300,31 +332,6 @@ def _select_media_type() -> str:
     if choice in ["1", "2", "3", "4"]:
         return options[int(choice) - 1]
     return default_mt or "all"
-
-
-def _select_date_preset() -> str:
-    """Let user choose date preset."""
-    last = _load_last_selection()
-    default_dp = last.get("date_preset") if last else "any"
-
-    print("\nDate preset:")
-    print("  1. any        — no date filter")
-    print("  2. last_7_days — last 7 days")
-    print("  3. last_30_days — last 30 days")
-    print("  4. custom     — enter custom start/end dates")
-
-    options = ["any", "last_7_days", "last_30_days", "custom"]
-    if default_dp in options:
-        default_idx = options.index(default_dp)
-    else:
-        default_idx = 0
-
-    choice = _prompt("Select date preset", default=str(default_dp))
-    if not choice and default_dp:
-        return default_dp
-    if choice in ["1", "2", "3", "4"]:
-        return options[int(choice) - 1]
-    return default_dp or "any"
 
 
 def _select_ad_age_hours() -> int | None:
@@ -614,11 +621,10 @@ def build_scraping_filters(
         media_type = "all"
 
     # ──── Date preset ────
-    date_preset = pick(kwargs.get("date_preset"), _select_date_preset)
-    if not date_preset:
-        date_preset = "any"
-    custom_start = None if date_preset != "custom" else date.today()
-    custom_end = None
+    # Either side may be blank for an open-ended range. When both are set they
+    # override ad age, which is the same filter expressed relatively.
+    custom_start = _parse_date_arg(kwargs.get("custom_start_date"), "date-from")
+    custom_end = _parse_date_arg(kwargs.get("custom_end_date"), "date-to")
 
     # ──── Keywords ────
     keywords = kwargs.get("keywords")
@@ -692,14 +698,12 @@ def build_scraping_filters(
         delivery_status=delivery_status,
         platforms=platforms,
         media_type=media_type,
-        date_preset=date_preset,
         custom_start_date=custom_start,
         custom_end_date=custom_end,
         delivered_to_regions=delivered_regions,
         languages=languages,
         sort_order=sort_order,
         ad_age_hours=ad_age_hours,
-        results_limit_per_keyword=50,  # fixed default, per user request
     )
 
     # Apply heuristic patterns if provided
@@ -716,7 +720,6 @@ def build_scraping_filters(
         "delivery_status": delivery_status,
         "platforms": platforms,
         "media_type": media_type,
-        "date_preset": date_preset,
         "keywords": keywords,
         "ad_age_hours": ad_age_hours,
         "delivered_to_regions": delivered_regions,
@@ -778,7 +781,8 @@ def main(argv: list | None = None) -> None:
         delivery_status=args.delivery_status,
         platforms=args.platforms,
         media_type=args.media_type,
-        date_preset=args.date_preset,
+        custom_start_date=args.date_from,
+        custom_end_date=args.date_to,
         keywords=args.keywords,
         ad_age=args.ad_age,
         regions=args.regions,
@@ -798,9 +802,8 @@ def main(argv: list | None = None) -> None:
     print(f"  Delivery status: {filters.delivery_status}")
     print(f"  Platforms:       {', '.join(filters.platforms) if filters.platforms else 'all'}")
     print(f"  Media type:      {filters.media_type}")
-    print(f"  Date preset:     {filters.date_preset}")
+    print(f"  Date range:      {filters.custom_start_date or 'any'} .. {filters.custom_end_date or 'today'}")
     print(f"  Ad age hours:    {filters.ad_age_hours or 'none'}")
-    print(f"  Results limit:   {filters.results_limit_per_keyword} (fixed)")
     print(f"  Regions:         {', '.join(filters.delivered_to_regions) if filters.delivered_to_regions else 'ALL'}")
     print(f"  Languages:       {', '.join(filters.languages) if filters.languages else 'all'}")
     print(f"  Sort order:      {filters.sort_order}")
