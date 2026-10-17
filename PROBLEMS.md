@@ -258,3 +258,25 @@ life of the file.
   genuinely async, so the realistic hangs are covered.
 - Judging a group of one still costs a full AI round-trip. That is the price of not
   discarding it.
+### ✅ Nothing catches a page that fails to render · fixed 2026-10-17
+
+The Search page rendered blank on every load, with no build error, no lint error
+and no failing test. Two layers now:
+
+- **`frontend/app/error.js`** and **`app/global-error.js`** — React catches the
+  crash and renders the actual error message with Try again / Reload. Before
+  this, a component that threw while drawing produced pure white. The global one
+  uses plain inline styles on purpose: if the failure is in the stylesheet or the
+  layout, the theme classes may be the thing that is missing.
+- **`scripts/page_smoke.py`** — opens all six pages and fails on an uncaught
+  exception, the error boundary showing, or a near-empty render. A page that
+  fails and then succeeds on reload is reported separately from one that fails
+  twice: the second is a defect, the first is usually the backend blinking.
+
+  Deliberately standalone, not in the regression suite. That suite is fast and
+  hermetic — 309 checks, no browser, no servers — and a Next dev server would
+  slow every run and make it flaky.
+
+Verified by reintroducing the original bug on purpose: the smoke check reported
+`/config BROKEN — showed the error boundary (Cannot access 'lens' before
+initialization)` and exited 1. With the fix restored, all six pages pass.
