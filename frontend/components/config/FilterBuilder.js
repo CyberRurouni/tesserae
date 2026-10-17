@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter } from '@/components/ui/Card';
 import { Select } from '@/components/ui/Select';
+import { Input } from '@/components/ui/Input';
 import { cn } from '@/lib/utils';
 import { clearDraft, readDraft, writeDraft } from '@/lib/draft';
 import HarvestPanel from '@/components/config/HarvestPanel';
@@ -17,12 +18,6 @@ const PLATFORMS = [
   { value: 'audience_network', label: 'Audience Network', hint: 'Off-platform apps' },
   { value: 'whatsapp', label: 'WhatsApp', hint: 'Status & inbox ads' },
   { value: 'threads', label: 'Threads', hint: 'Threads ads' },
-];
-
-const DATE_OPTIONS = [
-  { value: 'any', label: 'Any time' },
-  { value: 'last_7_days', label: 'Last 7 days' },
-  { value: 'last_30_days', label: 'Last 30 days' },
 ];
 
 const AD_AGE_PRESETS = [
@@ -44,7 +39,8 @@ const INITIAL = {
   delivery_status: 'active',
   platforms: PLATFORMS.map((p) => p.value),
   media_type: 'all',
-  date_preset: 'any',
+  custom_start_date: '',
+  custom_end_date: '',
   ad_age_hours: '',
   regions: 'ALL',
   languages: 'en',
@@ -258,6 +254,8 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
       keywords: Array.isArray(merged.keywords) ? merged.keywords : [],
       languages: restoredLanguages[0] || 'all',
       ad_age_hours: merged.ad_age_hours == null ? '' : String(merged.ad_age_hours),
+      custom_start_date: merged.custom_start_date || '',
+      custom_end_date: merged.custom_end_date || '',
       cycles: Number(merged.cycles) || INITIAL.cycles,
       parallel_workers: Math.min(
         Math.max(Number(merged.parallel_workers) || INITIAL.parallel_workers, 1),
@@ -297,16 +295,22 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
   const [useLastKeywords, setUseLastKeywords] = useState(false);
   const [draftRestored, setDraftRestored] = useState(() => Boolean(readDraft()));
 
-  // Persist on every change. This is what makes visiting another page safe:
-  // the form remounts from the draft instead of from the last run's settings.
-  useEffect(() => {
-    writeDraft(formData);
-  }, [formData, lens]);
-
   // Resolve the active lens once, so the run names it explicitly instead of
   // letting the backend guess which profile is current.
   const [lens, setLens] = useState(null);
   const [lensError, setLensError] = useState(null);
+
+  // Persist on every change. This is what makes visiting another page safe:
+  // the form remounts from the draft instead of from the last run's settings.
+  //
+  // Declared AFTER `lens`, not before it. A dependency array is evaluated during
+  // render, so reading `lens` here while its `const` is still further down threw
+  // "Cannot access 'lens' before initialization" and took the whole Search page
+  // with it — a blank screen, every load. The deps do not need `lens` anyway:
+  // nothing this effect touches comes from the lens.
+  useEffect(() => {
+    writeDraft(formData);
+  }, [formData]);
 
   useEffect(() => {
     let active = true;
@@ -682,12 +686,26 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
                 { value: 'meme', label: 'Meme ads' },
               ]}
             />
-            <Select
-              label="Posted within"
-              value={formData.date_preset}
-              onChange={(v) => update('date_preset', v)}
-              options={DATE_OPTIONS}
-            />
+            {/* An explicit range, replacing a "Posted within" dropdown whose
+                every option duplicated "Ad age" and did nothing at all — it was
+                never sent to Meta. Both ends map to Meta's own From/To, and
+                override ad age when set. */}
+            <div className="grid grid-cols-2 gap-2">
+              <Input
+                label="Posted from"
+                type="date"
+                value={formData.custom_start_date}
+                onChange={(e) => update('custom_start_date', e.target.value)}
+                hint="optional"
+              />
+              <Input
+                label="Posted to"
+                type="date"
+                value={formData.custom_end_date}
+                onChange={(e) => update('custom_end_date', e.target.value)}
+                hint="optional"
+              />
+            </div>
             <Select
               label="Ad age"
               value={formData.ad_age_hours}
