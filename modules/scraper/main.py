@@ -9,6 +9,9 @@ packaged in this city's warehouses (browser.py / search.py / extract.py).
 import asyncio
 import inspect
 import logging
+import re
+import unicodedata
+from functools import lru_cache
 
 from playwright.async_api import BrowserContext, Page
 
@@ -132,6 +135,53 @@ FETCH_BATCH = 20
 JUDGE_BATCH = 20
 
 
+# Typography that carries no meaning for matching, folded to a plain form.
+# Apostrophes first: Meta's ad copy uses the curly ones, so "we\u2019re hiring" was
+# not matching the pattern "we're hiring" — one of the category's own phrases had
+# never matched anything. Dashes are included for the same reason.
+_CHAR_FOLDING = (
+    ("\u2018", "'"), ("\u2019", "'"), ("\u201a", "'"), ("\u201b", "'"),
+    ("\u201c", '"'), ("\u201d", '"'), ("\u201e", '"'), ("\u2032", "'"),
+    ("\u00a0", " "), ("\u2007", " "), ("\u202f", " "), ("\u2009", " "),
+    ("\u200b", ""), ("\u200c", ""), ("\u200d", ""), ("\ufeff", ""),
+    ("\u2010", "-"), ("\u2011", "-"), ("\u2012", "-"), ("\u2013", "-"),
+    ("\u2014", "-"), ("\u2015", "-"), ("\u2212", "-"),
+)
+_WS = re.compile(r"\s+")
+
+
+@lru_cache(maxsize=2048)
+def _norm_pattern(pattern: str) -> str:
+    """A pattern, normalised. Cached: the list is walked once per ad."""
+    return _norm_text(pattern)
+
+
+def _norm_text(text: str) -> str:
+    """
+    Fold a string down so that matching is about WORDS, not typography.
+
+    Matching was `pattern.lower() in text`, which quietly fails on four things
+    that are everywhere in real ad copy:
+
+      * curly quotes — "we’re hiring" (U+2019) against "we're hiring". Meta's own
+        ads contain U+2019; this was found in text we crawled. So one of the
+        category's own phrases had never matched anything.
+      * a phrase split by a line break — "Apply\\nhere" is not "apply here"
+      * non-breaking and zero-width spaces, invisible in the copy
+      * dash variants — an en-dash is not a hyphen
+
+    The text and the pattern are put through the SAME function, so neither side
+    can be the odd one out. Normalising only one is how you end up with a pattern
+    that still cannot match its own spacing.
+    """
+    if not text:
+        return ""
+    text = unicodedata.normalize("NFKC", text)
+    for src, dst in _CHAR_FOLDING:
+        text = text.replace(src, dst)
+    return _WS.sub(" ", text).strip().lower()
+
+
 def passes_heuristics(
     ad: AdRecord,
     filters: ScrapingFilters,
@@ -141,27 +191,30 @@ def passes_heuristics(
     The heuristic backbone: explicit require/exclude ad-text patterns,
     then the CATEGORY's own tick/cross patterns, then the ad-age
     ceiling. The AI checkpoint never sees ads that fail here.
+
+    Both the ad text and every pattern are normalised first, so what is compared
+    is wording rather than punctuation. See _norm_text.
     """
-    text = ad.ad_text.lower()
-    if not text.strip():  # no body text at all → nothing to judge, reject
+    text = _norm_text(ad.ad_text)
+    if not text:  # no body text at all → nothing to judge, reject
         return False
 
     for pattern in filters.require_ad_text_patterns:      # AND semantics
-        if pattern.lower() not in text:
+        if _norm_pattern(pattern) not in text:
             return False
 
     if filters.require_any_ad_text_patterns:              # OR semantics
-        if not any(p.lower() in text for p in filters.require_any_ad_text_patterns):
+        if not any(_norm_pattern(p) in text for p in filters.require_any_ad_text_patterns):
             return False
 
     for pattern in filters.exclude_ad_text_patterns:
-        if pattern.lower() in text:
+        if _norm_pattern(pattern) in text:
             return False
 
     if category is not None:                              # category's own sieve
         heur = category.heuristics
         for pattern in heur.require_ad_text_patterns:
-            if pattern.lower() not in text:
+            if _norm_pattern(pattern) not in text:
                 return False
         # The category's OR-vocabulary is honoured here too, not only via the
         # filters object. _build_filters already merges it in, so skipping it
@@ -169,11 +222,11 @@ def passes_heuristics(
         # raw ScrapingFilters would silently skip the category's own gate,
         # which is the kind of gap that looks like a filtering bug later.
         if heur.require_any_ad_text_patterns and not any(
-            p.lower() in text for p in heur.require_any_ad_text_patterns
+            _norm_pattern(p) in text for p in heur.require_any_ad_text_patterns
         ):
             return False
         for pattern in heur.exclude_ad_text_patterns:
-            if pattern.lower() in text:
+            if _norm_pattern(pattern) in text:
                 return False
 
     if filters.ad_age_hours is not None and ad.ad_age_hours is not None:

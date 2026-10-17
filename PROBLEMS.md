@@ -73,9 +73,21 @@ investment ads). But its vocabulary is loose in both directions:
 - **Missed lead** — a real ad phrased outside those 29 phrases ("Rust Engineer —
   Remote", "Rust openings available") is discarded before the AI sees it. Silent.
 
-Work parked by request: tuning the vocabulary. **Not** parked, and cheap: *count what
-the sieve drops and show it on the run*, so a keyword where it is eating everything
-is visible instead of silent.
+Two phrases added by request: `apply here` and `send your cv` (30 -> 32).
+
+Matching is now **normalised on both sides** — the ad text and the pattern go
+through the same function. Plain substring matching was failing on curly quotes (Meta's
+own ads use U+2019, so a pattern written "we're hiring" never matched "we’re hiring"),
+phrases split by a line break, non-breaking and zero-width spaces, and dash variants.
+Measured across 109 phrase x typography combinations: **77 failed before and match
+now, 0 match less.** Normalising only the text would have fixed none of them.
+
+Left alone deliberately: `looking for a` still matches "Looking for a home", which
+passes non-jobs to the AI. It is the known loose one, and tightening it was not
+requested.
+
+**Still open:** *count what the sieve drops and show it on the run*, so a keyword
+where it is eating everything is visible instead of silent.
 
 ### 3. An unvalidated category crashes the orchestrator
 

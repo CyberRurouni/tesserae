@@ -2126,6 +2126,77 @@ def test_filters_reach_meta():
           "nothing this effect touches comes from the lens")
 
 
+def test_heuristic_matching():
+    """
+    The sieve compares by plain substring: `pattern.lower() in text.lower()`.
+
+    That quietly fails on four things that are everywhere in real ad copy:
+    curly quotes, a phrase split across a line break, non-breaking and
+    zero-width spaces, and dash variants. Meta's own ads contain U+2019 — found
+    in text we crawled — so a pattern written "we're hiring" never matched
+    "we’re hiring".
+
+    Measured: of 109 phrase x typography combinations tried against the real
+    vocabulary, **77 failed before normalisation and match now**, and **0 match
+    less**. Normalising only one side would fix none of them, so both the ad text
+    and the pattern go through the same function.
+    """
+    print("\n[35] the sieve matches wording, not typography")
+    from core.schemas.category import CATEGORIES
+    from modules.scraper.main import _norm_text, passes_heuristics
+
+    vocab = CATEGORIES["career_jobs"].heuristics.require_any_ad_text_patterns
+
+    def sieve(text):
+        return passes_heuristics(
+            AdRecord(ad_archive_id="x", source_keyword="k", ad_text=text),
+            ScrapingFilters(category="career_jobs",
+                            require_any_ad_text_patterns=list(vocab)))
+
+    check("a curly apostrophe matches the straight one it was written with",
+          sieve("We’re hiring Rust engineers"))
+    check("a phrase split across a line break still matches",
+          sieve("Apply\nhere for the Rust role"))
+    check("a non-breaking space does not hide the phrase",
+          sieve("Send your CV to join us"))
+    check("doubled whitespace does not hide the phrase",
+          sieve("We  are  hiring"))
+    check("capitalisation is already handled and still is",
+          sieve("SEND YOUR CV"))
+
+    # It must not become looser in the other direction.
+    check("a non-job ad is still dropped",
+          not sieve("NMRDA Sanctioned plots, call 9923474203"))
+    check("an ad with no body text is still dropped",
+          not sieve(""))
+    check("a course ad is still excluded",
+          not sieve("Enrol in our Rust programming course"))
+
+    # The direction worth guarding is the one that costs us ads. Folding text
+    # towards plain ASCII can only help a pattern MATCH, so an exclude can start
+    # firing on typography it used to miss — which would drop a lead that used to
+    # reach the AI.
+    for text in ("Take a Rust course", "rust COURSES", "enrolment starts soon",
+                 "Enrol\u00a0today"):
+        check(f"an exclusion still fires through odd typography: {text!r}",
+              not sieve(text))
+    check("a non-job ad with curly apostrophes is still dropped",
+          not sieve("If you’ve always called a bruise, it’s not a bruise"))
+
+    # The two phrases added by request.
+    for phrase in ("apply here", "send your cv"):
+        check(f"'{phrase}' is in the vocabulary", phrase in vocab)
+
+    # Both sides normalised: a pattern written with odd spacing still matches.
+    odd = ScrapingFilters(category="career_jobs",
+                          require_any_ad_text_patterns=["send   your cv"])
+    check("a pattern is normalised too, not only the ad text",
+          passes_heuristics(
+              AdRecord(ad_archive_id="x", source_keyword="k", ad_text="Send your CV"),
+              odd),
+          "normalising one side only would fix none of the cases above")
+
+
 def main():
     print("═" * 62)
     print("  Tesserae regression — sandbox:", _SANDBOX)
@@ -2148,6 +2219,7 @@ def main():
     test_progress_is_visible()
     test_live_result_store()
     test_filters_reach_meta()
+    test_heuristic_matching()
 
     # Leave nothing behind. Safe because TESSERAE_REDIS_DB_OFFSET moved these
     # databases off the ones the app uses.

@@ -71,6 +71,8 @@ HIRING_VOCABULARY = [
     "position available",
     "open position",
     "now accepting applications",
+    "apply here",
+    "send your cv",
     "work with us",
     "freelance",
     "contract role",
