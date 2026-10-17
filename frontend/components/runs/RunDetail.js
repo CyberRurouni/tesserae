@@ -344,10 +344,49 @@ export function RunDetail({ runId }) {
             <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
               <div className="h-full rounded-full bg-gradient-to-r from-primary to-glow transition-all duration-500" style={{ width: `${Math.max(4, run.progress || 0)}%` }} />
             </div>
+
+            {/* How far down the CURRENT keyword we are. The bar above is the
+                whole run, which barely moves while one large keyword grinds
+                through hundreds of ads — so without this, a run doing real work
+                looks exactly like a stalled one. That confusion is what the
+                idle detector used to act on. */}
+            {run.phase !== 'judging' && run.cards_seen > 0 && (
+              <div className="space-y-1">
+                <div className="flex justify-between text-[11px] text-muted-foreground">
+                  <span>this keyword&rsquo;s list</span>
+                  <span className="tabular-nums">
+                    {Number(run.cards_seen).toLocaleString()} seen
+                    {run.estimate ? ` of ~${Number(run.estimate).toLocaleString()} Meta thinks exist` : ''}
+                  </span>
+                </div>
+                {run.cards_target > 0 && (
+                  <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-primary/50 transition-all duration-500"
+                      style={{
+                        width: `${Math.min(100, Math.max(2, (Number(run.cards_seen) / Number(run.cards_target)) * 100))}%`,
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+              {run.phase === 'judging' && run.ads_judging_total > 0 && (
+                <span className="font-medium text-foreground tabular-nums">
+                  judged {Number(run.ads_judged || 0).toLocaleString()} of{' '}
+                  {Number(run.ads_judging_total).toLocaleString()} in this group
+                </span>
+              )}
               {run.harvested_total > 0 && (
                 <span className="font-medium text-foreground">
                   {run.harvested_total} ad{run.harvested_total === 1 ? '' : 's'} scraped so far
+                </span>
+              )}
+              {run.phase !== 'judging' && run.ads_collected > 0 && (
+                <span>
+                  {run.ads_collected} found for this keyword
                 </span>
               )}
               {run.keywords_harvested?.length > 0 && (

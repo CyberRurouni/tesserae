@@ -1808,6 +1808,53 @@ def test_streaming_harvest():
           "on_harvested is None" in src and "return group" in src)
 
 
+def test_progress_is_visible():
+    """
+    A run that is working must be distinguishable from a run that has hung.
+
+    The backend had been reporting exactly the right numbers for a while —
+    cards seen against Meta's estimate, ads found, ads judged — on every scroll
+    step and every judged batch. None of it reached the screen. The Next route
+    builds its response from a whitelist, so a field added upstream and not added
+    there is dropped silently: the run page had no way to explain its own
+    behaviour, and a run grinding through one large keyword looked identical to a
+    dead one. That confusion is what the idle detector used to act on.
+
+    Both layers are pinned, because either one alone still shows nothing.
+    """
+    print("\n[32] a working run can be told apart from a dead one")
+    import interface.main as api
+
+    fe = Path(__file__).resolve().parents[1] / "frontend"
+    route = (fe / "app" / "api" / "runs" / "[id]" / "route.js").read_text()
+    detail = (fe / "components" / "runs" / "RunDetail.js").read_text()
+
+    # ── the backend has to be producing them ────────────────────────────────
+    step_cb = inspect.getsource(api.run_orchestrator_background)
+    for field in ("cards_seen", "cards_target", "ads_collected", "estimate"):
+        check(f"the backend reports {field}", f'"{field}"' in step_cb)
+    check("and the judging tick reports its own progress",
+          "ads_judged" in step_cb and "ads_judging_total" in step_cb)
+
+    # ── the proxy has to pass them on ───────────────────────────────────────
+    for field in ("cards_seen", "cards_target", "ads_collected", "estimate",
+                  "ads_judged", "ads_judging_total"):
+        check(f"the Next route forwards {field}", f"{field}:" in route,
+              "the response is built from a whitelist — an unlisted field is dropped silently")
+
+    # ── and the page has to show them ───────────────────────────────────────
+    check("the page shows how far down the current list we are",
+          "cards_seen" in detail and "cards_target" in detail)
+    check("against Meta's own estimate, so the number means something",
+          "estimate" in detail)
+    check("the page shows the AI's progress on the group in hand",
+          "ads_judged" in detail and "ads_judging_total" in detail)
+    check("and says which phase it is in", "judging" in detail)
+    check("the list position is its own bar, not the whole-run one",
+          "this keyword" in detail,
+          "the run bar barely moves during one large keyword, which is the problem")
+
+
 def main():
     print("═" * 62)
     print("  Tesserae regression — sandbox:", _SANDBOX)
@@ -1827,6 +1874,7 @@ def main():
     test_patience()
     test_idle_run_is_stopped()
     test_streaming_harvest()
+    test_progress_is_visible()
 
     # Leave nothing behind. Safe because TESSERAE_REDIS_DB_OFFSET moved these
     # databases off the ones the app uses.

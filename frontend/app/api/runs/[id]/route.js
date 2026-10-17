@@ -144,6 +144,21 @@ export async function GET(request, { params }) {
       harvested_total: live?.harvested_total ?? 0,
       keywords_harvested: live?.keywords_harvested ?? [],
       total_keywords: live?.total_keywords ?? null,
+      // How far along THIS keyword is, and how far along the AI is. The single
+      // progress bar above is the whole run, which barely moves while one large
+      // keyword grinds through hundreds of ads — so a run doing real work looks
+      // stalled. These two are what answer "is it going, and how far".
+      //
+      // cards_seen / estimate is the honest measure of position in the list:
+      // Meta's own header says roughly how many results exist for this keyword.
+      // ads_judged / ads_judging_total is the AI's progress on the group in hand.
+      cards_seen: live?.cards_seen ?? null,
+      cards_target: live?.cards_target ?? null,
+      ads_collected: live?.ads_collected ?? null,
+      estimate: live?.estimate ?? null,
+      scroll_steps: live?.scroll_steps ?? null,
+      ads_judged: live?.ads_judged ?? null,
+      ads_judging_total: live?.ads_judging_total ?? null,
       log_hint: live?.log_hint ?? null,
       config: live?.config || null,
       current_keyword: live?.current_keyword ?? null,
