@@ -110,6 +110,27 @@ STUCK_SCROLL_LIMIT = 3
 # a FAULT exit, not an exhaustion exit, and it says so.
 MAX_STUCK_RELOADS = 3
 
+# ── Streaming: two thresholds, both 20, and they are NOT the same number ────
+#
+# Judging used to happen once per keyword, after that keyword's crawl finished.
+# So a keyword returning 549 ads held all 549 in memory, showed nothing at all
+# for the whole keyword, and lost every one of them if the run died near the end.
+# The fix is to keep two buffers and deal with each on its own cadence:
+#
+#   FETCH_BATCH — ads read off the page before the cheap filters run.
+#   JUDGE_BATCH — ads that SURVIVED those filters before the AI is asked.
+#
+# They drift apart on purpose. Read 20 and keep 6: the fetch buffer empties and
+# the judge buffer gains 6. Read 20 more and keep 11: the judge buffer is at 17,
+# still under, so nothing is spent. Sending 20 fetched ads to the AI would mean
+# paying to judge ads the heuristics had already thrown away.
+#
+# Both flush the WHOLE buffer rather than trimming it to exactly the threshold,
+# so there is never a remainder to remember. When the judge buffer crosses 20 it
+# goes up with whatever else is in there (20-39 ads).
+FETCH_BATCH = 20
+JUDGE_BATCH = 20
+
 
 def passes_heuristics(
     ad: AdRecord,
@@ -242,6 +263,7 @@ async def _scrape_keyword(
     worker_label: str = "",
     should_stop=None,
     on_step=None,
+    on_harvested=None,
 ) -> list[AdRecord]:
     """
     Crawl ONE keyword on ONE page and return the ads worth judging.
@@ -254,6 +276,13 @@ async def _scrape_keyword(
     would be caught and swallowed by the parallel worker below, which would then
     carry on to the next keyword.
     `on_step` reports cards-seen-so-far per scroll, for liveness.
+
+    `on_harvested` makes this keyword STREAM rather than accumulate: groups of ads
+    are handed over mid-crawl, as soon as there are enough of them, instead of
+    the whole keyword being returned at the end. Passed `None` — as the tests and
+    the non-UI paths do — it keeps the old behaviour exactly and returns every
+    candidate, so there is still one code path to reason about per mode rather
+    than two divergent ones.
 
     Split out of the loop so the same body serves both the sequential path and
     each parallel worker. The only shared mutable state is `seen_ids`, and the
@@ -284,6 +313,93 @@ async def _scrape_keyword(
     # this keyword publishes its own ids, otherwise our own harvest looks like
     # someone else's and we would discard everything we just crawled.
     sibling_claimed: set[str] = set()
+
+    # ── the two streaming buffers ───────────────────────────────────────────
+    # `fetch_buffer` holds ads read off the page that have not yet been through
+    # the cheap filters. `judge_buffer` holds the survivors, waiting for enough
+    # of them to be worth the AI. See FETCH_BATCH / JUDGE_BATCH for why they are
+    # separate numbers.
+    fetch_buffer: list[AdRecord] = []
+    judge_buffer: list[AdRecord] = []
+    # With no callback there is nothing to stream to, so groups accumulate here
+    # and are returned exactly as they were before streaming existed.
+    fresh: list[AdRecord] = []
+    already_final = deferred_renewed = heuristic_passed = 0
+    judged_sent = 0
+    judge_groups = 0
+
+    def _already_decided(ad: AdRecord) -> bool:
+        """Do we already have a final answer for this one? Asked on arrival.
+
+        This is a set lookup, not a judgement: accepted lead, universal junk,
+        this profile's rejections, what this request parked. Only the last can
+        come back — a different request gets to judge a deferred ad again.
+        Answering it here rather than at the buffer threshold is free, and it
+        means ads we already know the answer for are never carried, never
+        counted, and never occupy a slot in a batch we pay to judge.
+        """
+        nonlocal already_final, deferred_renewed
+        if run_seen.shared and ad.ad_archive_id in sibling_claimed:
+            # A sibling worker on this run took it first.
+            already_final += 1
+            return True
+        if filter_index is None:
+            return False
+        skip, why = filter_index.check(ad.ad_archive_id)
+        if not skip:
+            return False
+        already_final += 1
+        if why == "deferred":
+            # Passing over a deferred ad renews it — the whole cost of not
+            # re-judging it under an unchanged request.
+            if renew_deferral(profile_id, ad.ad_archive_id):
+                deferred_renewed += 1
+        return True
+
+    async def _flush_fetch() -> int:
+        """Run the heuristics over the fetch buffer. Survivors join the judge buffer."""
+        nonlocal heuristic_passed
+        moved = 0
+        for ad in fetch_buffer:
+            if not passes_heuristics(ad, filters, category):
+                continue
+            heuristic_passed += 1
+            ad.category = cat_id  # stamp the lens — AI + storage read it
+            judge_buffer.append(ad)
+            moved += 1
+        fetch_buffer.clear()
+        return moved
+
+    async def _flush_judge(force: bool = False) -> list[AdRecord]:
+        """Hand the judge buffer over, if there is enough of it — or if forced.
+
+        `force` is the end of a keyword, a Stop, or an idle run. All three mean
+        the same thing: stop waiting and deal with what is on hand. A buffer
+        holding three ads is still judged, because the alternative is throwing
+        them away, and a group of one costs a round trip, not a fortune.
+
+        Returns the group when there is no callback to send it to (the caller
+        wants the ads back), and an empty list when it has already gone out by
+        callback — so nothing is ever handed over twice.
+        """
+        nonlocal judged_sent, judge_groups
+        if not judge_buffer:
+            return []
+        if not force and len(judge_buffer) < JUDGE_BATCH:
+            return []
+        group = list(judge_buffer)
+        judge_buffer.clear()
+        judged_sent += len(group)
+        judge_groups += 1
+        if on_harvested is None:
+            return group          # no callback: hand them back to the caller
+        await _report_harvest(on_harvested, group, keyword, len(seen_ids))
+        return []
+
+    async def _drain() -> list[AdRecord]:
+        """Everything still buffered, judged. Used on every exit path."""
+        await _flush_fetch()
+        return await _flush_judge(force=True)
 
     # Meta's own zero-results signal: skip the entire crawl. Scrolling an empty
     # page is pointless and looks robotic, and it is not a failure — so it gets
@@ -367,6 +483,15 @@ async def _scrape_keyword(
 
         if new_ads:
             keyword_ads.extend(new_ads)
+            # Straight into the fetch buffer, minus anything we already have a
+            # final answer for. That question is free to ask, so it is asked
+            # here rather than at the threshold — see _already_decided.
+            fetch_buffer.extend(ad for ad in new_ads if not _already_decided(ad))
+            if len(fetch_buffer) >= FETCH_BATCH:
+                await _flush_fetch()
+                # Empty when a callback took the group; the ads themselves when
+                # there is none, so callers that want them back get them.
+                fresh.extend(await _flush_judge())
 
         # Hitting the target does not end the crawl. It only buys the shorter
         # dead-end budget, so the page gets to confirm the bottom.
@@ -579,39 +704,21 @@ async def _scrape_keyword(
         # KNOWN condition and returned above, so it never reaches here.)
         await collect_page_html(page, tag=f"no_cards_{keyword.replace(' ', '_')}")
 
-    fresh: list[AdRecord] = []
-    already_final = deferred_renewed = heuristic_passed = 0
-    for ad in keyword_ads:
-        # One decision per card, answered from memory: already-accepted lead,
-        # then universal junk, then this profile's own rejections, then what
-        # this request parked. Only the last can come back — a different
-        # request gets to judge a deferred ad again.
-        if filter_index is not None:
-            skip, why = filter_index.check(ad.ad_archive_id)
-            if skip:
-                already_final += 1
-                if why == "deferred":
-                    # Passing over a deferred ad renews it — the whole cost of
-                    # not re-judging it under an unchanged request.
-                    if renew_deferral(profile_id, ad.ad_archive_id):
-                        deferred_renewed += 1
-                continue
-        if run_seen.shared and ad.ad_archive_id in sibling_claimed:
-            # A sibling worker on this run took it first.
-            already_final += 1
-            continue
-        if not passes_heuristics(ad, filters, category):
-            continue
-        heuristic_passed += 1
-        ad.category = cat_id  # stamp the lens — AI + storage read it
-        fresh.append(ad)
+    # Every way out of the loop above lands here — the bottom, a Stop, an
+    # unusable tab — and all of them mean the same thing: stop waiting and deal
+    # with what is on hand. One drain, so no exit can forget it and quietly
+    # discard a partial group. In streaming mode `fresh` stays empty and the groups
+    # went out mid-crawl; without a callback this is the whole of the old
+    # per-keyword behaviour.
+    fresh.extend(await _drain())
 
     logger.info(
         "%s🧺 Keyword %r: %d ad card(s) seen on this list (%d new to the run; %d run-wide unique) — "
-        "%d already decided%s, %d passed heuristics -> %d to AI",
+        "%d already decided%s, %d passed heuristics -> %d to AI%s",
         tag, keyword, len(keyword_cards), len(keyword_ads), len(seen_ids), already_final,
         f" ({deferred_renewed} deferrals renewed)" if deferred_renewed else "",
-        heuristic_passed, len(fresh),
+        heuristic_passed, judged_sent,
+        f" in {judge_groups} group(s)" if judge_groups > 1 else "",
     )
     if waited:
         logger.info(
@@ -706,13 +813,13 @@ async def _scrape_on(
                     profile_id, request_id, seen_ids, seen_prints,
                     extract_lock, is_first_keyword=(idx == 0),
                     should_stop=should_stop, on_step=on_step,
+                    on_harvested=on_harvested,
                 )
                 fresh.extend(batch)
-                # Report each keyword the moment it lands. A run that scrapes
-                # for an hour before returning anything gives the UI nothing to
-                # show, and a crash anywhere in that hour loses every ad.
-                if on_harvested and batch:
-                    await _report_harvest(on_harvested, batch, keyword, len(seen_ids))
+                # The keyword now reports its own groups mid-crawl, so it returns
+                # nothing to report here. This branch only fires for callers that
+                # passed no callback — the tests and the non-UI paths — and it is
+                # the whole of the old per-keyword behaviour for them.
         finally:
             await page.close()
     else:
@@ -744,10 +851,9 @@ async def _scrape_on(
                         is_first_keyword=(idx == 0 and j == 0),
                         worker_label=label,
                         should_stop=should_stop, on_step=on_step,
+                        on_harvested=on_harvested,
                     )
                     out.extend(batch)
-                    if on_harvested and batch:
-                        await _report_harvest(on_harvested, batch, keyword, len(seen_ids))
                 except Exception as exc:  # noqa: BLE001 - one bad keyword must not kill the run
                     logger.error("💥 %s keyword %r failed: %s", label, keyword, exc, exc_info=True)
             return out

@@ -1673,6 +1673,141 @@ def test_idle_run_is_stopped():
           "a healthy finish reported as Failed is how warnings get ignored")
 
 
+def test_streaming_harvest():
+    """
+    Judge in groups of ~20 while the crawl is still going, instead of holding a
+    whole keyword until it ends.
+
+    One keyword can return hundreds of ads — 'python developer' returns 549. All
+    of them used to sit in memory, nothing reached the screen for the whole
+    keyword, and a run that died near the end lost every one. Two buffers fix
+    that, and the numbers are deliberately NOT the same:
+
+      FETCH_BATCH — ads read off the page before the cheap filters run.
+      JUDGE_BATCH — ads that survived those filters before the AI is asked.
+
+    Read 20, keep 6: the fetch buffer empties, the judge buffer gains 6. Sending
+    20 *fetched* ads to the AI would mean paying to judge ads the heuristics had
+    already thrown away.
+    """
+    print("\n[31] a keyword streams its ads out instead of hoarding them")
+    import modules.scraper.main as sm
+
+    check("both thresholds are twenty",
+          sm.FETCH_BATCH == 20 and sm.JUDGE_BATCH == 20,
+          f"fetch={sm.FETCH_BATCH}, judge={sm.JUDGE_BATCH}")
+    src = inspect.getsource(sm._scrape_keyword)
+    check("they are used for different things",
+          "len(fetch_buffer) >= FETCH_BATCH" in src
+          and "len(judge_buffer) < JUDGE_BATCH" in src)
+
+    # ── it actually streams, and nothing is lost doing it ───────────────────
+    def run_case(total, stop_at=None, keep_every=1):
+        groups: list[list[str]] = []
+
+        async def harvest(batch, keyword, total_unique):
+            groups.append([a.ad_archive_id for a in batch])
+
+        cards = [f"c{i}" for i in range(total)]
+        st = {"steps": 0, "cursor": 0}
+
+        async def extract(page, source_keyword, seen_ids=None,
+                          seen_fingerprints=None, encountered=None):
+            out = []
+            for i in cards[st["cursor"]:st["cursor"] + 10]:
+                if encountered is not None:
+                    encountered.add(i)
+                if i in seen_ids:
+                    continue
+                seen_ids.add(i)
+                if int(i[1:]) % keep_every:      # stand-in for the heuristics
+                    continue
+                out.append(AdRecord(ad_archive_id=i, source_keyword=source_keyword,
+                                    ad_text="We are hiring"))
+            return out
+
+        async def scroll(page, distance=1800, baseline=None, ceiling_ms=1500):
+            st["steps"] += 1
+            if st["cursor"] >= len(cards):
+                return {"waited_ms": 10, "grew": False, "count": baseline, "moved": False}
+            st["cursor"] += 10
+            return {"waited_ms": 10, "grew": True, "count": baseline, "moved": True}
+
+        async def nothing(*a, **k):
+            return None
+
+        async def empty(*a, **k):
+            return False
+
+        async def estimate(*a, **k):
+            return 100
+
+        async def quiet(page):
+            # No signal, and sitting at the bottom: the plain end-of-list case,
+            # so this exercises the normal exit rather than the stuck-tab one.
+            return {"spinner": False, "see_more": False, "atBottom": True,
+                    "ads": 10, "ready": True}
+
+        saved = {n: getattr(sm, n) for n in (
+            "search_keyword", "apply_filters", "empty_results", "read_results_estimate",
+            "extract_ads_from_page", "scroll_step", "collect_page_html", "more_coming")}
+        sm.search_keyword, sm.apply_filters = nothing, nothing
+        sm.empty_results, sm.read_results_estimate = empty, estimate
+        sm.extract_ads_from_page, sm.scroll_step = extract, scroll
+        sm.collect_page_html, sm.more_coming = nothing, quiet
+        seen: set[str] = set()
+        try:
+            returned = asyncio.run(sm._scrape_keyword(
+                object(), "rust developer", ScrapingFilters(category="career_jobs"),
+                None, "career_jobs", RunSeenIds(), None, None, None, seen, set(),
+                asyncio.Lock(), is_first_keyword=True, on_harvested=harvest,
+                should_stop=(lambda: st["steps"] >= stop_at) if stop_at else None))
+        finally:
+            for n, f in saved.items():
+                setattr(sm, n, f)
+        delivered = [i for g in groups for i in g]
+        read = min(st["steps"] * 10, total) if stop_at else total
+        expected = {f"c{i}" for i in range(read) if i % keep_every == 0}
+        return groups, returned, delivered, expected
+
+    groups, returned, delivered, expected = run_case(100)
+    check("a hundred ads leave in full groups of twenty",
+          [len(g) for g in groups] == [20, 20, 20, 20, 20],
+          str([len(g) for g in groups]))
+    check("and every one is delivered exactly once",
+          sorted(delivered) == sorted(expected), f"{len(delivered)} delivered")
+    check("streaming hands nothing back to the caller",
+          returned == [], f"{len(returned)} returned")
+
+    # The tail is the case that loses ads if it is wrong.
+    groups, returned, delivered, expected = run_case(57)
+    check("a short tail is judged rather than dropped",
+          [len(g) for g in groups] == [20, 20, 17] and sorted(delivered) == sorted(expected),
+          f"{[len(g) for g in groups]} -> {len(delivered)} delivered")
+
+    groups, returned, delivered, expected = run_case(9)
+    check("even a group of one is judged",
+          [len(g) for g in groups] == [9] and sorted(delivered) == sorted(expected),
+          f"{[len(g) for g in groups]}")
+
+    # Stopping must not wait for a full group either.
+    for stop_at, label in ((3, "mid-stream"), (1, "almost immediately")):
+        groups, returned, delivered, expected = run_case(100, stop_at=stop_at)
+        check(f"stopping {label} flushes what is on hand, not a full group",
+              sorted(delivered) == sorted(expected) and delivered,
+              f"{[len(g) for g in groups]} -> {len(delivered)} delivered")
+
+    # Heuristics thinning the stream must not trigger early or late.
+    groups, returned, delivered, expected = run_case(40, keep_every=2)
+    check("a thinned stream waits for twenty survivors, not twenty fetched",
+          [len(g) for g in groups] == [20] and sorted(delivered) == sorted(expected),
+          f"{[len(g) for g in groups]}")
+
+    # Without a callback the old whole-keyword behaviour must be intact.
+    check("with no callback the ads come back at the end, as before",
+          "on_harvested is None" in src and "return group" in src)
+
+
 def main():
     print("═" * 62)
     print("  Tesserae regression — sandbox:", _SANDBOX)
@@ -1691,6 +1826,7 @@ def main():
     test_bulk_reader()
     test_patience()
     test_idle_run_is_stopped()
+    test_streaming_harvest()
 
     # Leave nothing behind. Safe because TESSERAE_REDIS_DB_OFFSET moved these
     # databases off the ones the app uses.
