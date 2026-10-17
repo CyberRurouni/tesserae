@@ -36,28 +36,7 @@ Decisions already made — do not re-ask these:
 
 ## Open — ranked by leverage
 
-### 1. Nothing catches a page that fails to render
-
-The entire Search page rendered **blank, on every load**, with no build error, no
-lint error and no failing test:
-
-```js
-useEffect(() => { writeDraft(formData); }, [formData, lens]);
-const [lens, setLens] = useState(null);   // declared 4 lines later
-```
-
-A dependency array is evaluated during render, so reading `lens` before its `const`
-threw `Cannot access 'lens' before initialization` and the error boundary took the
-page down. Found by accident, while verifying the date filters — because the page
-had to render for any of that to be checkable.
-
-All six pages render now (audited 2026-10-17). But **the class is invisible**: a
-component that throws while rendering gives a white screen and nothing else.
-
-There are no frontend tests at all. A check that opens each page and fails if it
-renders nothing would have caught this instantly, and costs about a second.
-
-### 2. The cheap sieve can silently throw away real leads
+### 1. The cheap sieve can silently throw away real leads
 
 `passes_heuristics` is a **hard gate in front of the AI** — an ad that fails never
 reaches the model, and nobody is told. `career_jobs` carries 29 fixed phrases.
@@ -89,14 +68,14 @@ requested.
 **Still open:** *count what the sieve drops and show it on the run*, so a keyword
 where it is eating everything is visible instead of silent.
 
-### 3. An unvalidated category crashes the orchestrator
+### 2. An unvalidated category crashes the orchestrator
 
 `modules/orchestrator/main.py:390` — `CATEGORIES[category_id].description` raises
 `KeyError` for an unknown category. Reachable by a direct API call.
 
 Same shape as the date validation fixed today, which now refuses at the API edge.
 
-### 4. Redis log noise — 28 tracebacks per suite run
+### 3. Redis log noise — 28 tracebacks per suite run
 
 `modules/verdicts.py` `_remove` does `srem(key, *sorted(doomed & before))`. When
 that intersection is empty, Redis raises. It is empty on **every verdict
@@ -109,7 +88,7 @@ succeeds. One-line guard.
 Harmless and genuinely costly — it trains you to ignore stack traces, which is
 exactly how a real one gets missed.
 
-### 5. The saved filter selection is git-tracked and written by two processes
+### 4. The saved filter selection is git-tracked and written by two processes
 
 `interface/.tesserae_filters.json` is tracked, and written by both the frontend and
 the backend with no locking — last writer wins. It has been dirty in most sessions
@@ -118,7 +97,7 @@ here, which is why it keeps almost getting committed by accident.
 It also carries fields the backend no longer understands; those are now stripped on
 read and named in the log (`_REMOVED_FIELDS` in `interface/select_filters.py`).
 
-### 6. CLI defects
+### 5. CLI defects
 
 - `--clis` is documented and does not exist.
 - `_select_platforms()` recurses on invalid input with no depth limit — the comment
@@ -126,13 +105,13 @@ read and named in the log (`_REMOVED_FIELDS` in `interface/select_filters.py`).
 - `--cycles 2` reported to hang on a stdin prompt (run-mode prompt runs before the
   "did the user pass args" check). **Unverified.**
 
-### 7. CORS is an invalid combination, and unnecessary
+### 6. CORS is an invalid combination, and unnecessary
 
 `allow_origins=["*"]` with `allow_credentials=True` (`interface/main.py:62`). Invalid
 together, and the browser never talks to :8000 directly anyway — it goes through
 the Next proxy.
 
-### 8. Frontend hygiene
+### 7. Frontend hygiene
 
 - **No frontend tests** — see #1.
 - Legacy `frontend/.eslintrc.json` alongside eslint v9 + `eslint-config-next@16`
@@ -140,7 +119,7 @@ the Next proxy.
 - Run-file parsing duplicated in Python *and* Node; Python's `/api/runs/{id}`
   returns `data` nested and the frontend ignores it entirely.
 
-### 9. Docs and hygiene
+### 8. Docs and hygiene
 
 - `collection.py` has **two stacked module docstrings** (bad-edit leftover) — lines
   1–27 and 29–44.
