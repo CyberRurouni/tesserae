@@ -81,17 +81,20 @@ def renew_deferral(profile_id: str | None, ad_id: str) -> bool:
 # promising 2 results look finished the moment the run had seen 20 ads
 # anywhere, so it quit after a single scroll and reported it as searched.
 #
-#   TARGET_UNIQUE_RATIO — the safety margin. 0.80 means "aim for 80% of what
-#     Meta estimated, then let the dead-end rule confirm the rest": the count
-#     rounds up, so a list that reaches 80% and then goes quiet is a healthy
-#     finish, not a shortfall.
+#   TARGET_UNIQUE_RATIO — the safety margin, and ONLY that. 0.70 means "once
+#     70% of what Meta estimated is on screen, be slightly less patient about
+#     confirming the tail". It is not a cap and never was: it cannot end a crawl,
+#     because the only exit is the dead-end budget below. Lowering it makes the
+#     shorter tail budget kick in SOONER, so 70% is marginally less thorough
+#     than 80%, not more — the crawl still walks to the real bottom either way.
+#     Measured: 'rust developer' reads ~190 and yields 174 (92%) on its own.
 #
 # There is deliberately NO step cap and no scroll-distance ceiling. A crawl
 # ends when the page stops giving us cards, never because a counter ran out —
 # and repeats bank nothing, so a page that has gone dry always reaches its
 # dead-end budget on its own. What IS bounded is the stuck-pane recovery below:
 # reloading a tab that is already broken just produces another broken tab.
-TARGET_UNIQUE_RATIO = 0.80
+TARGET_UNIQUE_RATIO = 0.70
 QUIET_STEPS_BEFORE_TARGET = 5
 QUIET_STEPS_AFTER_TARGET = 3
 
