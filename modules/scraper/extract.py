@@ -24,6 +24,40 @@ divs, often whitespace-only — the longest non-empty text wins.
 v2.2: extraction runs in INCREMENTAL passes — one pass per scroll step,
 with the caller supplying `seen_ids` — because the virtualized DOM
 recycles cards mid-scroll; a single slow pass misses most of them.
+
+v3: the whole page is read in ONE call instead of one call per card.
+
+    The previous version walked every Library-ID span on the page and asked
+    the browser to read its text — one round trip per card, every scroll
+    step — and only afterwards checked whether it already knew the answer.
+    So a page holding 250 cards cost 250 round trips to re-learn 240 ids it
+    had been told minutes earlier. Measured on a real crawl: a keyword with
+    153 ads made 20,494 reads where 153 would have done, 134x the
+    necessary work — and because the DOM grows as you scroll, the waste
+    compounds until a single pass takes minutes. That is the "it freezes on
+    keywords with lots of results" symptom.
+
+    The reader below is now one function that walks the page itself, skips
+    any card whose id we already hold, and returns everything it found in
+    one answer. Same selectors, same fields, same rules — only the number
+    of round trips changed. Heuristic-only, no AI, still one pass per
+    scroll step.
+
+    Measured on live Meta, 6 scroll steps, same page, both readers:
+
+        old 36.6s total   new 0.1s total   310x faster
+
+    and on a synthetic 250-card page, the shape that freezes hardest:
+
+        old 34.8s per pass   new 0.064s per pass   542x faster
+
+    One behaviour did change, and it was a bug being fixed rather than a rule
+    being altered: cta_text and cta_url are now populated. They were always
+    None in production, because the CTA lookup used a bare `a[...]` XPath that
+    matched nothing (see CTA_XPATH below). Verified live — the old form
+    matched 0 anchors per card, the corrected descendant form matches the real
+    buttons. Ads will now carry a call-to-action where they previously showed
+    none, and the judge can finally see it.
 """
 
 import logging
@@ -42,10 +76,10 @@ logger = logging.getLogger(__name__)
 # 🔹 SELECTORS — stable anchors confirmed from a live dump
 # ============================================================================
 
-LIBRARY_ID_TEXT = re.compile(r"Library ID:\s*(\d+)")
-# Same anchor without the capture group, for locating cards rather than parsing
-# one. search.py uses it to count what is on screen without extracting it.
-LIBRARY_ID_SPAN_PATTERN = re.compile(r"Library ID:\s*\d+")
+# The reader below carries its own copy of this pattern because it runs inside
+# the page. This one is here for search.py, which asks the same question the
+# cheap way — "how many cards are on screen" — to size the scroll.
+LIBRARY_ID_SPAN_PATTERN = r"Library ID:\s*(\d+)"
 CARD_XPATH = "ancestor::div[.//*[contains(@class, '_8nsi')]][1]"
 
 CREATIVE = "._8nsi"                                   # identity block only (logo + advertiser)
@@ -55,23 +89,154 @@ ADVERTISER_LINK = f"{CREATIVE} a[href^='https://www.facebook.com/']"
 AD_TEXT_DIV = "div[style*='white-space: pre-wrap']"
 # Creative CTA anchor: the l.facebook.com redirect, minus links that live
 # INSIDE the ad text div (legacy class _7jyr) — those are body links.
-CTA_XPATH = ("xpath=a[contains(@href,'l.facebook.com')]"
+#
+# Two things a live dump settled, both now load-bearing:
+#
+#   * A BARE `a[...]` XPath finds nothing here. Playwright resolves a chained
+#     xpath against the parent element, and `a` only matches direct children —
+#     while Meta's anchors sit five or six divs down. Measured on a live card:
+#     `a[...]` matched 0, `.//a[...]` matched 8. So cta_text and cta_url have
+#     been silently blank in production for the life of this file. The reader
+#     below uses a CSS descendant search, which does reach them.
+#   * `_7jy-` is the CAROUSEL TILE wrapper and must NOT be excluded — each tile
+#     carries its own button. Only `_7jyr` marks the ad body, confirmed live:
+#     the in-text links sit inside `_7jyr _a25-` with a pre-wrap div above
+#     them, while every real "Watch More"/"Learn more" sits outside it.
+CTA_XPATH = ("xpath=.//a[contains(@href,'l.facebook.com')]"
              "[not(ancestor::div[contains(@class,'_7jyr')])]")
 CTA_BUTTON_SPAN = "div.x2lah0s span"
 
-STARTED_PATTERN = re.compile(r"Started running on (.+)")
-TOTAL_ADS_PATTERN = re.compile(r"(\d+)\s+ads?\s+use this creative", re.I)
+STARTED_PATTERN = r"Started running on (.+)"
+TOTAL_ADS_PATTERN = r"(\d+)\s+ads?\s+use this creative"
 MULTIPLE_VERSIONS_TEXT = "This ad has multiple versions"
 ACTIVE_TEXT = "Active"
 
 _DATE_FORMATS = ("%d %b %Y", "%B %d, %Y", "%d %B %Y")
+
+# ============================================================================
+# 🔹 THE READER — runs inside the page
+# ============================================================================
+#
+# One call per scroll step. It does the card walk, the "is this id new?"
+# test, and the field extraction together, because every boundary between
+# those steps used to cost a round trip.
+#
+# It returns TWO things on purpose:
+#   ids      — every card on the page, known or not. This is progress: how far
+#              down the list we have actually scrolled.
+#   records  — full detail, for the cards we did NOT already hold. Asking the
+#              browser about a card we are going to discard is the waste this
+#              whole change exists to remove.
+#
+# `known` comes from Python and is used to skip work in the page, where a set
+# lookup is effectively free, instead of shipping every known card's detail
+# back over the wire.
+_CARD_FIELDS_JS = r"""
+(cfg) => {
+  const ID_RE = /Library ID:\s*(\d+)/;
+  const STARTED_RE = /Started running on (.+)/;
+  const TOTAL_RE = /(\d+)\s+ads?\s+use this creative/i;
+  const MULTI = 'This ad has multiple versions';
+
+  const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+  const body = (el) => (el ? (el.innerText || el.textContent || '') : '');
+  const trim = (s) => (s || '').trim();
+
+  const known = new Set(cfg.known || []);
+  const ids = [];
+  const records = [];
+  const claimed = new Set();
+
+  const spans = Array.from(document.querySelectorAll('span'))
+    .filter((s) => ID_RE.test(s.textContent || ''));
+
+  for (const span of spans) {
+    const m = ID_RE.exec(span.textContent || '');
+    if (!m) continue;
+    const id = m[1];
+    ids.push(id);
+    if (known.has(id)) continue;
+
+    // The card root: nearest ancestor DIV holding an _8nsi descendant. More
+    // than one span can match (a span wrapping the real one), so `claimed`
+    // makes sure a card is described once no matter how many anchors it has.
+    let card = span.parentElement;
+    while (card && !(card.tagName === 'DIV' && card.querySelector('[class*="_8nsi"]'))) {
+      card = card.parentElement;
+    }
+    if (!card || claimed.has(card)) continue;
+    claimed.add(card);
+
+    let advertiser_name = null;
+    let advertiser_page_url = null;
+    const adv = card.querySelector('._8nsi a[href^="https://www.facebook.com/"]');
+    if (adv) {
+      advertiser_name = trim(body(adv)) || null;
+      advertiser_page_url = adv.getAttribute('href');
+    }
+
+    // Carousel tiles each carry their own pre-wrap div, often whitespace
+    // only — the longest non-empty text wins.
+    let ad_text = '';
+    for (const b of card.querySelectorAll('div[style*="white-space: pre-wrap"]')) {
+      const t = trim(body(b));
+      if (t.length > ad_text.length) ad_text = t;
+    }
+
+    let cta_text = null;
+    let cta_url = null;
+    const ctas = Array.from(card.querySelectorAll('a[href*="l.facebook.com"]'))
+      .filter((a) => !a.closest('div[class*="_7jyr"]'));
+    const cta = ctas.length ? ctas[ctas.length - 1] : null;
+    if (cta) {
+      cta_url = cta.getAttribute('href');
+      const btn = cta.querySelector('div.x2lah0s span');
+      cta_text = trim(body(btn)) || null;
+      if (!cta_text) {
+        const lines = body(cta).split('\n').map((l) => l.trim()).filter(Boolean);
+        cta_text = lines.length ? lines[lines.length - 1] : null;
+      }
+    }
+
+    let started_raw = null;
+    for (const s of card.querySelectorAll('span')) {
+      const sm = STARTED_RE.exec(s.textContent || '');
+      if (sm) { started_raw = sm[1].trim().replace(/\.$/, ''); break; }
+    }
+
+    let is_active = false;
+    for (const el of card.querySelectorAll('*')) {
+      if (norm(el.textContent) === 'Active') { is_active = true; break; }
+    }
+
+    let total_active_ads = null;
+    for (const s of card.querySelectorAll('span')) {
+      const tm = TOTAL_RE.exec(s.textContent || '');
+      if (tm) { total_active_ads = parseInt(tm[1], 10); break; }
+    }
+
+    const labels = [];
+    if (card.querySelector('div[data-testid="ad-library-ad-carousel-container"]')) labels.push('carousel');
+    if (card.querySelector('[data-testid="ad-content-body-video-container"]')) labels.push('video');
+    for (const el of card.querySelectorAll('*')) {
+      if (norm(el.textContent) === MULTI) { labels.push('multiple_versions'); break; }
+    }
+
+    records.push({
+      ad_archive_id: id, advertiser_name, advertiser_page_url,
+      ad_text, cta_text, cta_url, started_raw, is_active, total_active_ads, labels,
+    });
+  }
+  return { ids, records };
+}
+"""
 
 
 def _parse_started(raw: str | None) -> datetime | None:
     """'Started running on 26 Aug 2026' -> datetime (live-confirmed format)."""
     if not raw:
         return None
-    m = STARTED_PATTERN.search(raw)
+    m = re.search(STARTED_PATTERN, raw)
     raw_date = m.group(1).strip().rstrip(".") if m else raw.strip()
     for fmt in _DATE_FORMATS:
         try:
@@ -79,18 +244,6 @@ def _parse_started(raw: str | None) -> datetime | None:
         except ValueError:
             continue
     return None
-
-
-async def _text_of(locator, limit: int = 1) -> str | None:
-    """inner_text of the Nth match (default first), or None — never raises."""
-    try:
-        if await locator.count() == 0:
-            return None
-        loc = locator.first if limit == 1 else locator.nth(limit - 1)
-        text = (await loc.inner_text()).strip()
-        return text or None
-    except Exception:
-        return None
 
 
 async def extract_ads_from_page(
@@ -101,10 +254,11 @@ async def extract_ads_from_page(
     encountered: set[str] | None = None,
 ) -> list[AdRecord]:
     """
-    Extract the ad cards currently in the DOM into AdRecords (new ones
-    only, when the caller supplies `seen_ids`). Heuristic-only — no AI
-    here. Cards are anchored on their Library ID span, so extraction
-    survives Meta's class-name churn.
+    Read the ad cards currently in the page into AdRecords.
+
+    New ones only, when the caller supplies `seen_ids`. Heuristic-only — no AI
+    here. Cards are anchored on their Library ID span, so extraction survives
+    Meta's class-name churn.
 
     `seen_fingerprints` collapses the same creative published under several
     Library IDs, which is what Meta does for one ad run across platforms.
@@ -112,111 +266,62 @@ async def extract_ads_from_page(
     this run" and the fingerprint decides "this is the same ad wearing a
     different number".
 
-    `encountered` is filled in place with EVERY ad id this pass laid eyes
-    on — including the ones already in `seen_ids`, and including the ones
-    dropped by the fingerprint collapse. It is the caller's progress
-    counter for one keyword: "how far down this list have we scrolled".
-    It is deliberately not the same thing as the returned records, because
-    reaching the bottom of a list and finding something new in it are two
-    different questions, and only the page can answer the first one.
+    `encountered` receives EVERY id on the page, including ones already
+    harvested — it is the caller's progress counter for one keyword: "how far
+    down this list have we scrolled". It is deliberately not the same thing as
+    the returned records, because reaching the bottom of a list and finding
+    something new in it are two different questions, and only the page can
+    answer the first one.
     """
     records: list[AdRecord] = []
     seen = seen_ids if seen_ids is not None else set()
     seen_prints = seen_fingerprints if seen_fingerprints is not None else set()
     collapsed = 0
 
-    id_spans = page.locator("span").filter(has_text=re.compile(r"Library ID:\s*\d+"))
-    count = await id_spans.count()
-    logger.info("🔍 %d ad cards in DOM for keyword %r", count, source_keyword)
+    try:
+        payload = await page.evaluate(_CARD_FIELDS_JS, {"known": sorted(seen)})
+    except Exception as exc:  # noqa: BLE001 - a read failure must not kill the crawl
+        logger.warning("⚠️ Could not read ad cards (%s)", exc)
+        return []
 
-    for i in range(count):
-        span = id_spans.nth(i)
+    on_screen = payload.get("ids") or []
+    if encountered is not None:
+        encountered.update(on_screen)
+
+    rows = payload.get("records") or []
+    logger.info("🔍 %d ad card(s) in DOM for keyword %r (%d new)", len(on_screen), source_keyword, len(rows))
+
+    for row in rows:
         try:
-            m = LIBRARY_ID_TEXT.search(await span.inner_text())
-            if not m:
-                continue
-            ad_id = m.group(1)
-            # Progress, not harvest: every card on screen counts toward how far
-            # this keyword's list goes, whether or not we have met it before.
-            if encountered is not None:
-                encountered.add(ad_id)
-            if ad_id in seen:  # earlier pass already harvested this card
+            ad_id = str(row.get("ad_archive_id") or "").strip()
+            if not ad_id or ad_id in seen:
                 continue
             seen.add(ad_id)
 
-            # Nearest ancestor containing the creative = the card root
-            card = span.locator(f"xpath={CARD_XPATH}")
-
-            advertiser_name = advertiser_url = None
-            adv = card.locator(ADVERTISER_LINK).first
-            if await adv.count():
-                advertiser_name = (await adv.inner_text()).strip() or None
-                advertiser_url = await adv.get_attribute("href")
-
-            # Carousel tiles each carry their own pre-wrap div (often
-            # whitespace-only) — take the LONGEST non-empty text, not the first.
-            ad_text = ""
-            try:
-                for node in await card.locator(AD_TEXT_DIV).all():
-                    chunk = (await node.inner_text()).strip()
-                    if len(chunk) > len(ad_text):
-                        ad_text = chunk
-            except Exception:
-                pass
-
-            cta_text = cta_url = None
-            cta = card.locator(CTA_XPATH).last  # creative CTA anchor (card-level)
-            if await cta.count():
-                cta_url = await cta.get_attribute("href")
-                cta_text = await _text_of(cta.locator(CTA_BUTTON_SPAN))
-                if not cta_text:  # fallback: last non-empty line of the link
-                    lines = [ln.strip() for ln in (await cta.inner_text()).splitlines() if ln.strip()]
-                    cta_text = lines[-1] if lines else None
-
-            started = _parse_started(
-                await _text_of(card.locator("span").filter(has_text=STARTED_PATTERN))
-            )
-
-            is_active = await card.get_by_text(ACTIVE_TEXT, exact=True).count() > 0
-
-            total_active_ads = None
-            ta_text = await _text_of(
-                card.locator("span").filter(has_text=TOTAL_ADS_PATTERN)
-            )
-            if ta_text and (tm := TOTAL_ADS_PATTERN.search(ta_text)):
-                total_active_ads = int(tm.group(1))
-
-            labels: list[str] = []
-            if await card.locator("div[data-testid='ad-library-ad-carousel-container']").count():
-                labels.append("carousel")
-            if await card.locator("[data-testid='ad-content-body-video-container']").count():
-                labels.append("video")
-            if await card.get_by_text(MULTIPLE_VERSIONS_TEXT).count():
-                labels.append("multiple_versions")
-
+            started = _parse_started(row.get("started_raw"))
             record = AdRecord(
                 ad_archive_id=ad_id,
-                advertiser_name=advertiser_name,
-                advertiser_page_url=advertiser_url,
-                total_active_ads=total_active_ads,
-                ad_text=ad_text,
-                cta_text=cta_text,
-                cta_url=cta_url,
+                advertiser_name=row.get("advertiser_name") or None,
+                advertiser_page_url=row.get("advertiser_page_url") or None,
+                total_active_ads=row.get("total_active_ads"),
+                ad_text=row.get("ad_text") or "",
+                cta_text=row.get("cta_text") or None,
+                cta_url=row.get("cta_url") or None,
                 started_date=started,
-                is_active=is_active,
+                is_active=row.get("is_active"),
                 ad_age_hours=(
                     (datetime.now(timezone.utc) - started).total_seconds() / 3600
                     if started
                     else None
                 ),
                 source_keyword=source_keyword,
-                heuristic_labels=labels,
+                heuristic_labels=list(row.get("labels") or []),
             )
             # Same creative under a different Library ID — Meta does this for one
             # ad run across platforms. Kept out of the results, because five
             # rows of one ad is five times the reading for the user and five
             # times the AI cost, and the user already saw the first one.
-            fingerprint = ad_fingerprint(advertiser_name, ad_text)
+            fingerprint = ad_fingerprint(record.advertiser_name, record.ad_text)
             if fingerprint and fingerprint in seen_prints:
                 collapsed += 1
                 continue
@@ -224,11 +329,11 @@ async def extract_ads_from_page(
                 seen_prints.add(fingerprint)
                 record.ad_fingerprint = fingerprint
             records.append(record)
-        except Exception as e:
-            logger.debug("⚠️ Skipped card %d for keyword %r: %s", i, source_keyword, e)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("⚠️ Skipped a card for keyword %r: %s", source_keyword, e)
 
     logger.info(
-        "✅ Extracted %d new cards this pass (total unique: %d%s) for keyword %r",
+        "✅ Extracted %d new card(s) this pass (total unique: %d%s) for keyword %r",
         len(records), len(seen),
         f", {collapsed} duplicate creative(s) collapsed" if collapsed else "",
         source_keyword,

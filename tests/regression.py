@@ -52,6 +52,7 @@ from core import (  # noqa: E402
 import modules.verdicts as V  # noqa: E402
 from modules.profiles.deferred import defer_ad  # noqa: E402
 from modules.verdicts import FilterIndex  # noqa: E402
+from modules.scraper.seen import RunSeenIds  # noqa: E402
 
 CATEGORY = "regression_test"
 PROFILE = "prof_test"
@@ -226,8 +227,7 @@ def test_judge():
 def test_scraper():
     print("\n[10] the scraper skips what the filter says")
     import modules.scraper.main as sm
-    from modules.scraper.seen import RunSeenIds
-
+    
     POPULAR = ["p_0", "p_1", "p_2"]
     keywords = [f"kw{i}" for i in range(6)]
 
@@ -493,7 +493,7 @@ def test_cycles():
 
     async def scrape(filters, headless=False, context=None, run_seen_ids=None,
                      profile_id=None, request_id=None, parallel_workers=1,
-                     on_harvested=None):
+                     on_harvested=None, should_stop=None, on_step=None):
         calls["searches"].append(list(filters.keywords))
         ads = [AdRecord(
             ad_archive_id=f"kw_{k}", advertiser_name="A", ad_text="We are hiring",
@@ -628,7 +628,8 @@ def test_cycles():
     async def scraping_then_failing_scrape(filters, headless=False, context=None,
                                            run_seen_ids=None, profile_id=None,
                                            request_id=None, parallel_workers=1,
-                                           on_harvested=None):
+                                           on_harvested=None, should_stop=None,
+                                           on_step=None):
         saved_calls = []
         for i, kw in enumerate(filters.keywords):
             ads_here = [AdRecord(ad_archive_id=f"k{i}_{j}", advertiser_name="A",
@@ -668,7 +669,7 @@ def test_cycles():
 
     async def scrape2(filters, headless=False, context=None, run_seen_ids=None,
                       profile_id=None, request_id=None, parallel_workers=1,
-                      on_harvested=None):
+                      on_harvested=None, should_stop=None, on_step=None):
         seen_scrape["keywords"] = list(filters.keywords)
         seen_scrape["workers"] = parallel_workers
         seen_scrape["request_id"] = request_id
@@ -1092,6 +1093,381 @@ def test_single_lens():
           "load_profile" not in judge_src and "_load_texts" not in src)
 
 
+# ── 12. stopping a run ──────────────────────────────────────────────────────
+def test_cancellation():
+    """
+    A run must be stoppable without losing what it already found.
+
+    The dangerous design is `task.cancel()`, which tears the coroutine down
+    mid-await and can land between "scraped an ad" and "wrote the ad".
+    Cancellation here is a flag the run polls and unwinds from, and the scrape
+    loop reacts by BREAKING — which is the same exit the bottom of a list takes,
+    so a cut-short keyword is judged and stored exactly like a finished one.
+    """
+    print("\n[23] a stopped run keeps everything it collected")
+    import modules.orchestrator.main as om
+    import modules.scraper.main as sm
+
+    CARDS = [f"c{i:03d}" for i in range(60)]
+    st = {"cursor": 0, "steps": 0}
+
+    async def search(page, keyword, filters, dismiss_cookies=False): return None
+    async def apply_f(page, filters): return None
+    async def estimate(page): return 60
+    async def empty(page): return False
+
+    async def extract(page, source_keyword=None, seen_ids=None,
+                      seen_fingerprints=None, encountered=None):
+        win = CARDS[st["cursor"]:st["cursor"] + 8]
+        out = []
+        for i in win:
+            if encountered is not None:
+                encountered.add(i)
+            if i in seen_ids:
+                continue
+            seen_ids.add(i)
+            out.append(AdRecord(ad_archive_id=i, source_keyword=source_keyword,
+                                ad_text="We are hiring"))
+        return out
+
+    async def scroll(page, distance=1800, baseline=None, ceiling_ms=1500):
+        st["steps"] += 1
+        st["cursor"] += 8
+        return {"waited_ms": 10, "grew": True, "count": baseline, "moved": True}
+
+    async def dump(page, tag): return None
+
+    saved = {n: getattr(sm, n) for n in
+             ("search_keyword", "apply_filters", "empty_results",
+              "read_results_estimate", "extract_ads_from_page", "scroll_step",
+              "collect_page_html")}
+    sm.search_keyword, sm.apply_filters = search, apply_f
+    sm.empty_results, sm.read_results_estimate = empty, estimate
+    sm.extract_ads_from_page, sm.scroll_step, sm.collect_page_html = extract, scroll, dump
+
+    try:
+        # ── stop mid-keyword: the keyword's ads still come back ────────────
+        stop_after = {"n": 3}
+
+        def should_stop():
+            return st["steps"] >= stop_after["n"]
+
+        seen_ids = set()
+        got = asyncio.run(sm._scrape_keyword(
+            object(), "cancel mid", ScrapingFilters(category="career_jobs"),
+            None, "career_jobs", RunSeenIds(), None, None, None, seen_ids, set(),
+            asyncio.Lock(), is_first_keyword=True, should_stop=should_stop,
+        ))
+        check("it actually stopped early", st["steps"] < 10, f"{st['steps']} steps")
+        check("and it did NOT crawl the whole list",
+              len(seen_ids) < len(CARDS), f"{len(seen_ids)}/{len(CARDS)} cards")
+        check("the ads collected before the stop are still returned",
+              len(got) > 0, f"{len(got)} ads")
+
+        # ── and the run-level guard, which is the property that matters ────
+        saved_om = {n: getattr(om, n) for n in
+                    ("browser_session", "run_scrape", "judge_ad_relevance",
+                     "record_results", "coll", "actors")}
+
+        calls = {"scrape": 0}
+
+        async def scrape_never(filters, headless=False, context=None,
+                               run_seen_ids=None, profile_id=None, request_id=None,
+                               parallel_workers=1, on_harvested=None,
+                               should_stop=None, on_step=None):
+            calls["scrape"] += 1
+            return []
+
+        @contextlib.asynccontextmanager
+        async def browser(headless=False):
+            yield object()
+
+        class Coll:
+            def load_collection(self, c, profile_id=None):
+                return {"keywords": [], "searchable": [], "prompts": []}
+            def harvest_active(self, c, profile_id=None): return False
+            def merge_with_history(self, stats, *a, **k): return list(stats)
+            def save_keyword(self, stats, *a, **k): return stats
+            def save_prompt(self, *a, **k): pass
+            def delete_keywords(self, *a, **k): pass
+            def set_harvest_flag(self, *a, **k): pass
+
+        async def gen(request):
+            class B: keywords = ["k1"]
+            return B()
+
+        om.browser_session, om.run_scrape = browser, scrape_never
+        om.judge_ad_relevance = lambda ads, **kw: asyncio.sleep(0, result={})
+        om.record_results = lambda *a, **k: {"accepted": []}
+        om.coll, om.actors = Coll(), type("A", (), {
+            "generate_keywords": staticmethod(gen),
+            "assign_keyword_timings": staticmethod(lambda s: asyncio.sleep(0, result={}))})
+
+        cfg = RunConfig(profile=UserProfile(background=""),
+                        filters=ScrapingFilters(category="career_jobs", keywords=["kw"]))
+        totals = asyncio.run(om.run_orchestrator(
+            cfg, run_mode="generate", max_cycles=None, run_id=None,
+            should_stop=lambda: True))
+        check("a run stopped before its first cycle does no work",
+              totals["cycles"] == 0 and calls["scrape"] == 0,
+              f"cycles={totals['cycles']} scrapes={calls['scrape']}")
+
+        for n, f in saved_om.items():
+            setattr(om, n, f)
+    finally:
+        for n, f in saved.items():
+            setattr(sm, n, f)
+
+    # ── 13. only one run at a time ─────────────────────────────────────────
+    print("\n[24] one run owns the pipeline at a time")
+    from datetime import datetime, timedelta
+    import interface.main as api
+
+    api.run_states.clear()
+    now = datetime.now()
+    api.run_states["run_live"] = {
+        "id": "run_live", "status": "running",
+        "started_at": now.isoformat(), "last_progress_at": now.isoformat(),
+    }
+    busy = api.live_run()
+    check("a fresh run holds the pipeline", busy and busy[0] == "run_live")
+
+    api.run_states["run_live"]["last_progress_at"] = (now - timedelta(minutes=30)).isoformat()
+    check("a run that stopped reporting is released, not left to lock forever",
+          api.live_run() is None)
+    check("and it is marked abandoned rather than silently dropped",
+          api.run_states["run_live"]["status"] == "abandoned")
+
+    api.run_states["run_done"] = {
+        "id": "run_done", "status": "completed",
+        "started_at": now.isoformat(), "last_progress_at": now.isoformat(),
+    }
+    check("a finished run does not hold it", api.live_run() is None)
+    check("every terminal state releases the pipeline",
+          "cancelled" in api.TERMINAL_STATES and "failed" in api.TERMINAL_STATES,
+          sorted(api.TERMINAL_STATES))
+
+    api.run_states.clear()
+
+    # ── 14. the crawl reports liveness ─────────────────────────────────────
+    print("\n[25] a long keyword is not silent")
+    src = inspect.getsource(sm._scrape_keyword)
+    check("every scroll step reports progress", "on_step" in src)
+    check("and cancellation is polled there too", "should_stop" in src)
+    check("cancellation breaks rather than raising, so the worker keeps what it found",
+          "break" in src and "Cancelled mid-keyword" in src)
+
+    # ── 15. history tells the truth about a stopped run ─────────────────────
+    print("\n[26] a stopped run is recorded as stopped")
+    import interface.main as api
+    from genesis.config import ADS_DIR
+
+    check("the API reads run files from the configured data directory, not the repo root",
+          api.DATA_DIR == ADS_DIR,
+          "two definitions of one directory meant a stopped run could not find its own file")
+
+    run_id = "run_regression_stamp"
+    path = ADS_DIR / "career_jobs" / f"{run_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"accepted": [{"ad_archive_id": "a1"}], "keywords": ["kw"]}))
+    api._finalise_run_file(run_id, "cancelled")
+    stamped = json.loads(path.read_text())
+    check("the outcome is stamped into the file", stamped.get("status") == "cancelled")
+    check("and the rows it collected are untouched", len(stamped.get("accepted") or []) == 1)
+    check("so a restarted server does not report it as completed",
+          (stamped.get("status") or "completed") == "cancelled")
+
+    before = list(ADS_DIR.rglob("run_never_happened*.json"))
+    api._finalise_run_file("run_never_happened", "cancelled")
+    check("a run that found nothing is not given an empty file",
+          list(ADS_DIR.rglob("run_never_happened*.json")) == before)
+
+    # ── 16. and the wiring that makes Stop actually reach the crawl ─────────
+    print("\n[27] the stop flag reaches the crawl")
+    bg = inspect.getsource(api.run_orchestrator_background)
+    check("the run polls a flag the cancel endpoint sets",
+          "cancel_requested" in bg and "should_stop=" in bg)
+    check("which is read from the same in-memory run state",
+          "run_states.get(run_id" in bg)
+
+    scrape_src = inspect.getsource(sm.run_scrape) + inspect.getsource(sm._scrape_on)
+    check("the scraper threads it all the way to the scroll loop",
+          scrape_src.count("should_stop") >= 4,
+          f"{scrape_src.count('should_stop')} mentions")
+    path.unlink(missing_ok=True)
+
+
+def test_bulk_reader():
+    """
+    The reader used to walk the page one card at a time — one call to the
+    browser per card, every scroll step — and only afterwards ask whether it
+    already knew the card. So a page of 250 cards that we had already read 242
+    of cost 250 calls to re-learn 242 ids we were told minutes earlier. One
+    keyword with 153 ads made 20,494 of those calls: 134x the work the job
+    needed, growing as the list grew. That is the freeze.
+
+    These checks pin the two things that fix it: ONE call per pass, and known
+    ids costing nothing. A stub stands in for the page, so the suite stays
+    browser-free and fast.
+    """
+    print("\n[28] a pass over the page costs one call, not one per card")
+    import modules.scraper.extract as ex
+
+    class StubPage:
+        """Answers like the real reader does, and counts how often it is asked."""
+
+        def __init__(self, payload):
+            self.payload = payload
+            self.calls = 0
+            self.args = []
+
+        async def evaluate(self, script, arg=None):
+            self.calls += 1
+            self.args.append(arg)
+            return self.payload
+
+    def card(i, adv="Acme", txt="We are hiring a Python developer.", **over):
+        row = {
+            "ad_archive_id": i, "advertiser_name": adv,
+            "advertiser_page_url": f"https://www.facebook.com/{adv}",
+            "ad_text": txt, "cta_text": "Learn More",
+            "cta_url": f"https://l.facebook.com/l.php?u={i}",
+            "started_raw": "26 Aug 2026", "is_active": True,
+            "total_active_ads": 42, "labels": ["video"],
+        }
+        row.update(over)
+        return row
+
+    # ── one call, however many cards are on the page ─────────────────────────
+    for n in (1, 50, 250):
+        payload = {"ids": [str(i) for i in range(n)],
+                   "records": [card(str(i), txt=f"Ad {i}") for i in range(n)]}
+        page = StubPage(payload)
+        got = asyncio.run(
+            ex.extract_ads_from_page(page, "kw"))
+        check(f"{n} cards on the page still cost one call",
+              page.calls == 1, f"{page.calls} call(s)")
+        check(f"and all {n} are returned", len(got) == n, f"{len(got)} returned")
+
+    # ── an id we already hold costs nothing ──────────────────────────────────
+    known = [str(i) for i in range(242)]
+    payload = {"ids": known + ["242", "243", "244", "245", "246", "247", "248", "249"],
+               "records": [card(str(i), txt=f"Ad {i}") for i in range(242, 250)]}
+    page = StubPage(payload)
+    seen = set(known)
+    prints: set[str] = set()
+    enc: set[str] = set()
+    got = asyncio.run(
+        ex.extract_ads_from_page(page, "kw", seen_ids=seen,
+                                 seen_fingerprints=prints, encountered=enc))
+    check("a page we have already read still costs one call", page.calls == 1)
+    check("and returns only the 8 new cards", len(got) == 8, f"{len(got)} returned")
+    check("the reader is told what we already hold, so it can skip in the page",
+          page.args[0].get("known") == sorted(known), f"{len(page.args[0]['known'])} ids")
+    check("progress still counts every card on the page, new or not",
+          len(enc) == 250, f"{len(enc)} counted")
+
+    # Defence in depth: even if the page hands back a known id, it is dropped.
+    payload = {"ids": ["1", "2"], "records": [card("1"), card("2", txt="Something else")]}
+    page = StubPage(payload)
+    got = asyncio.run(
+        ex.extract_ads_from_page(page, "kw", seen_ids={"1"}))
+    check("a known id is dropped even if the page returns it anyway",
+          [g.ad_archive_id for g in got] == ["2"])
+
+    # ── the same creative under a new id is still collapsed ──────────────────
+    payload = {"ids": ["1", "2"],
+               "records": [card("1", adv="Acme", txt="Same words here"),
+                           card("2", adv="Acme", txt="Same words here")]}
+    page = StubPage(payload)
+    prints = set()
+    got = asyncio.run(
+        ex.extract_ads_from_page(page, "kw", seen_fingerprints=prints))
+    check("the same ad under a second Library ID is collapsed to one row",
+          [g.ad_archive_id for g in got] == ["1"], f"{len(got)} row(s)")
+
+    # ── fields survive the trip out of the page ─────────────────────────────
+    payload = {"ids": ["1"], "records": [card(
+        "1", adv="Globex", txt="FastAPI engineer wanted.",
+        cta_text="Sign Up", cta_url="https://l.facebook.com/l.php?u=1",
+        started_raw="26 Aug 2026", is_active=False, total_active_ads=7,
+        labels=["carousel", "video", "multiple_versions"])]}
+    page = StubPage(payload)
+    got = asyncio.run(ex.extract_ads_from_page(page, "kw"))
+    r = got[0]
+    check("advertiser, text and call-to-action survive",
+          r.advertiser_name == "Globex" and r.ad_text == "FastAPI engineer wanted."
+          and r.cta_text == "Sign Up" and r.cta_url == "https://l.facebook.com/l.php?u=1")
+    check("the start date is parsed from what the page read",
+          r.started_date is not None and r.started_date.year == 2026,
+          str(r.started_date))
+    age = r.ad_age_hours
+    check("the ad's age in hours is worked out",
+          age is not None and age > 0, f"{age:.1f}h" if age is not None else "None")
+    check("carousel, video and multiple-versions all survive",
+          r.heuristic_labels == ["carousel", "video", "multiple_versions"])
+    check("and 'Active' still reads as active", r.is_active is False)
+
+    # ── a date shape Meta has not been seen to use must not be invented ──────
+    # Each of these is a real string someone could hand us. A parser that
+    # guesses turns "when did this run" into fiction, which is worse than
+    # leaving it blank — so unknown shapes return nothing.
+    for raw in ("26 Aug 2026", "September 3, 2026", "3 September 2026"):
+        check(f"'{raw}' is understood", ex._parse_started(raw) is not None)
+    for raw in ("3 September, 2026", "sometime last week", "", None):
+        check(f"'{raw}' is left blank rather than guessed",
+              ex._parse_started(raw) is None)
+
+    # ── a page that will not answer must not kill the crawl ─────────────────
+    class BrokenPage:
+        async def evaluate(self, script, arg=None):
+            raise RuntimeError("target closed")
+
+    got = asyncio.run(
+        ex.extract_ads_from_page(BrokenPage(), "kw"))
+    check("a page that will not answer yields no ads instead of raising",
+          got == [])
+
+    # ── the page-side copy must not drift from the documented selectors ──────
+    js = ex._CARD_FIELDS_JS
+    check("the page-side reader carries the Library-ID anchor",
+          "Library ID:" in js)
+    check("and the identity block, so the card walk has something to find",
+          '_8nsi' in js)
+    check("and keeps in-text links out of the call-to-action",
+          '_7jyr' in js)
+    check("and reads the carousel and video markers",
+          "ad-library-ad-carousel-container" in js
+          and "ad-content-body-video-container" in js)
+    check("search.py can still ask how many cards are on screen",
+          hasattr(ex, "LIBRARY_ID_SPAN_PATTERN"),
+          "search.py imports this to size its scroll")
+
+    # ── two things a live dump settled, so they cannot quietly come back ────
+    #
+    # The CTA lookup used to read `a[contains(@href,'l.facebook.com')]` with
+    # no leading `.//`. Playwright resolves a chained xpath against the parent
+    # element and `a` matches only direct children, while Meta's anchors sit
+    # several divs down — so it matched nothing and cta_text/cta_url were blank
+    # in production for the life of the file. Measured live: bare form 0,
+    # descendant form 8.
+    check("the call-to-action selector reaches anchors that are not direct children",
+          ex.CTA_XPATH.startswith("xpath=.//a["),
+          "a bare a[...] matches nothing on a live card")
+    check("and the page-side reader searches the same way, not as a bare a[...]",
+          "querySelectorAll('a[href*=\"l.facebook.com\"]')" in js)
+    check("the call-to-action button text is still read from its own span",
+          "x2lah0s" in js)
+
+    # `_7jy-` is the CAROUSEL TILE wrapper, live-confirmed: each tile carries
+    # its own button, all reading "Watch More". Excluding it would throw away
+    # the real call-to-action on every carousel ad. Only `_7jyr` marks the ad
+    # body and must be excluded.
+    check("carousel tiles are not mistaken for in-text links",
+          "_7jy-" not in js and "_7jy-" not in ex.CTA_XPATH,
+          "excluding _7jy- drops the button on every carousel ad")
+
+
 def main():
     print("═" * 62)
     print("  Tesserae regression — sandbox:", _SANDBOX)
@@ -1106,6 +1482,8 @@ def main():
     test_active_pointer()
     test_keyword_lifetime()
     test_single_lens()
+    test_cancellation()
+    test_bulk_reader()
 
     # Leave nothing behind. Safe because TESSERAE_REDIS_DB_OFFSET moved these
     # databases off the ones the app uses.
