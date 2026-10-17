@@ -384,6 +384,16 @@ export function RunDetail({ runId }) {
                   {run.harvested_total} ad{run.harvested_total === 1 ? '' : 's'} scraped so far
                 </span>
               )}
+              {/* What the cheap filter let through. Fetched is always more than
+                  judged — that is the sieve working — so without this a keyword
+                  yielding 3% is indistinguishable from one yielding 100%. */}
+              {run.sieve_totals?.cards > 0 && (
+                <span className="tabular-nums">
+                  {Number(run.sieve_totals.cards).toLocaleString()} fetched ·{' '}
+                  {Number(run.sieve_totals.kept).toLocaleString()} passed filters ·{' '}
+                  {Number(run.sieve_totals.to_ai).toLocaleString()} to AI
+                </span>
+              )}
               {run.phase !== 'judging' && run.ads_collected > 0 && (
                 <span>
                   {run.ads_collected} found for this keyword

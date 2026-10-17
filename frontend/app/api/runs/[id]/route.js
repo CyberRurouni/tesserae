@@ -173,6 +173,10 @@ export async function GET(request, { params }) {
       scroll_steps: live?.scroll_steps ?? null,
       ads_judged: live?.ads_judged ?? null,
       ads_judging_total: live?.ads_judging_total ?? null,
+      // How many ads the cheap filter let through, run-wide. Fetched is always
+      // more than judged — that is the sieve doing its job — so without this a
+      // keyword that yields 3% looks exactly like one that yields 100%.
+      sieve_totals: live?.sieve_totals ?? null,
       log_hint: live?.log_hint ?? null,
       config: live?.config || null,
       current_keyword: live?.current_keyword ?? null,

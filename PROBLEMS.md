@@ -36,44 +36,21 @@ Decisions already made — do not re-ask these:
 
 ## Open — ranked by leverage
 
-### 1. The cheap sieve can silently throw away real leads
+### 1. CLI defects — not reachable from the app
 
-`passes_heuristics` is a **hard gate in front of the AI** — an ad that fails never
-reaches the model, and nobody is told. `career_jobs` carries 29 fixed phrases.
+`--clis` is documented and does not exist. `_select_platforms()` recurses on
+invalid input with no depth limit — the comment in the code admits it.
 
-Live measurement, `rust developer`: **1 of 33 new ads reached the AI.**
+The app is driven from the frontend, so this is only reachable by typing commands.
+Left alone deliberately.
 
-The filter is earning its keep (it correctly dropped 51 real-estate, medical and
-investment ads). But its vocabulary is loose in both directions:
+### 2. An unvalidated category crashes the orchestrator — not reachable from the app
 
-- **False pass** — `"looking for a"` matched *"Looking for a home in Lucknow?"* and
-  *"Looking for a Reliable Container House Supplier"*. Two of three ads that got
-  through were not jobs.
-- **Missed lead** — a real ad phrased outside those 29 phrases ("Rust Engineer —
-  Remote", "Rust openings available") is discarded before the AI sees it. Silent.
+`CATEGORIES[category_id].description` raises `KeyError` for an unknown category.
+The frontend's category is a hardcoded, disabled dropdown with one option
+(`career_jobs`), so this needs a hand-written API call.
 
-Two phrases added by request: `apply here` and `send your cv` (30 -> 32).
-
-Matching is now **normalised on both sides** — the ad text and the pattern go
-through the same function. Plain substring matching was failing on curly quotes (Meta's
-own ads use U+2019, so a pattern written "we're hiring" never matched "we’re hiring"),
-phrases split by a line break, non-breaking and zero-width spaces, and dash variants.
-Measured across 109 phrase x typography combinations: **77 failed before and match
-now, 0 match less.** Normalising only the text would have fixed none of them.
-
-Left alone deliberately: `looking for a` still matches "Looking for a home", which
-passes non-jobs to the AI. It is the known loose one, and tightening it was not
-requested.
-
-**Still open:** *count what the sieve drops and show it on the run*, so a keyword
-where it is eating everything is visible instead of silent.
-
-### 2. An unvalidated category crashes the orchestrator
-
-`modules/orchestrator/main.py:390` — `CATEGORIES[category_id].description` raises
-`KeyError` for an unknown category. Reachable by a direct API call.
-
-Same shape as the date validation fixed today, which now refuses at the API edge.
+Left alone deliberately: guarding it is one line, but nothing can send it.
 
 ### 3. Redis log noise — 28 tracebacks per suite run
 
@@ -97,21 +74,13 @@ here, which is why it keeps almost getting committed by accident.
 It also carries fields the backend no longer understands; those are now stripped on
 read and named in the log (`_REMOVED_FIELDS` in `interface/select_filters.py`).
 
-### 5. CLI defects
-
-- `--clis` is documented and does not exist.
-- `_select_platforms()` recurses on invalid input with no depth limit — the comment
-  in the code admits it.
-- `--cycles 2` reported to hang on a stdin prompt (run-mode prompt runs before the
-  "did the user pass args" check). **Unverified.**
-
-### 6. CORS is an invalid combination, and unnecessary
+### 5. CORS is an invalid combination, and unnecessary
 
 `allow_origins=["*"]` with `allow_credentials=True` (`interface/main.py:62`). Invalid
 together, and the browser never talks to :8000 directly anyway — it goes through
 the Next proxy.
 
-### 7. Frontend hygiene
+### 6. Frontend hygiene
 
 - **No frontend tests** — see #1.
 - Legacy `frontend/.eslintrc.json` alongside eslint v9 + `eslint-config-next@16`
@@ -119,7 +88,7 @@ the Next proxy.
 - Run-file parsing duplicated in Python *and* Node; Python's `/api/runs/{id}`
   returns `data` nested and the frontend ignores it entirely.
 
-### 8. Docs and hygiene
+### 7. Docs and hygiene
 
 - `collection.py` has **two stacked module docstrings** (bad-edit leftover) — lines
   1–27 and 29–44.
@@ -249,6 +218,22 @@ life of the file.
   genuinely async, so the realistic hangs are covered.
 - Judging a group of one still costs a full AI round-trip. That is the price of not
   discarding it.
+### ✅ The sieve's tally was only in the log · fixed 2026-10-17
+
+`rust developer` fetches 127 cards and the filter keeps 1. Fetched is always more
+than judged — that is the sieve working — so a keyword yielding 3% and one yielding
+100% looked identical on a page that showed counts. The numbers were always logged,
+so the answer existed, but only by digging through a log file after the fact.
+
+The run page now shows `N fetched · N passed filters · N to AI`, accumulated across
+keywords. No change to what the sieve does, and no extra AI cost — it surfaces a
+number that was already computed.
+
+The vocabulary itself is unchanged apart from the two phrases requested
+(`apply here`, `send your cv`) and normalisation on both sides: 77 of 109
+phrase x typography combinations now match that did not, with none matching less.
+`looking for a` is knowingly left loose, so property ads still reach the AI.
+
 ### ✅ Nothing catches a page that fails to render · fixed 2026-10-17
 
 The Search page rendered blank on every load, with no build error, no lint error

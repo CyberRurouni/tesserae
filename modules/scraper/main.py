@@ -765,6 +765,31 @@ async def _scrape_keyword(
     # per-keyword behaviour.
     fresh.extend(await _drain())
 
+    # Tell the run how this keyword's funnel actually came out.
+    #
+    # This was logged and nothing more, so the one number that answers "did Meta
+    # have nothing, or did the sieve eat it?" was only visible by digging through
+    # a log file after the fact. The sieve is doing its job — fetched ads are
+    # always more than judged ads — but a keyword that yields almost nothing
+    # looks identical whether the list was thin or the filter was harsh.
+    if on_step is not None:
+        try:
+            await on_step(
+                keyword=keyword,
+                cards_seen=len(keyword_cards),
+                ads_collected=len(keyword_ads),
+                steps=steps,
+                sieve_done=True,
+                sieve={
+                    "cards": len(keyword_cards),
+                    "already_decided": already_final,
+                    "kept": heuristic_passed,
+                    "to_ai": judged_sent,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - reporting must never break a crawl
+            logger.debug("⚠️ sieve reporting failed (%s)", exc)
+
     logger.info(
         "%s🧺 Keyword %r: %d ad card(s) seen on this list (%d new to the run; %d run-wide unique) — "
         "%d already decided%s, %d passed heuristics -> %d to AI%s",

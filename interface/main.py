@@ -469,6 +469,22 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
             state["estimate"] = event.get("estimate")
             state["scroll_steps"] = event.get("steps")
 
+            # The sieve's tally for a finished keyword, accumulated for the run.
+            #
+            # This answers the one question a keyword that finds nothing cannot
+            # answer on its own: did Meta have nothing, or did the filter take
+            # it? Fetched is always more than judged — that is the sieve working
+            # — but a 3% yield and a 100% yield look the same on a page that
+            # only shows counts.
+            sieve = event.get("sieve")
+            if sieve:
+                totals = state.setdefault(
+                    "sieve_totals",
+                    {"cards": 0, "already_decided": 0, "kept": 0, "to_ai": 0},
+                )
+                for field in ("cards", "already_decided", "kept", "to_ai"):
+                    totals[field] = int(totals.get(field) or 0) + int(sieve.get(field) or 0)
+
         def on_progress(**event):
             heartbeat()
             phase = event.get("phase")

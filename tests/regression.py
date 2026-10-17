@@ -2142,6 +2142,8 @@ def test_heuristic_matching():
     and the pattern go through the same function.
     """
     print("\n[35] the sieve matches wording, not typography")
+    import interface.main as api
+    import modules.scraper.main as sm
     from core.schemas.category import CATEGORIES
     from modules.scraper.main import _norm_text, passes_heuristics
 
@@ -2195,6 +2197,23 @@ def test_heuristic_matching():
               AdRecord(ad_archive_id="x", source_keyword="k", ad_text="Send your CV"),
               odd),
           "normalising one side only would fix none of the cases above")
+
+    # ── and the sieve's tally is visible, not just in a log file ─────────────
+    # The numbers were always logged, so "did Meta have nothing, or did the
+    # filter take it?" could only be answered by digging through a log after
+    # the fact. Fetched is always more than judged — that is the sieve working —
+    # so a 3% yield and a 100% yield look identical on a page showing counts.
+    fe = Path(__file__).resolve().parents[1] / "frontend"
+    check("a finished keyword reports what the sieve kept",
+          "sieve_done=True" in inspect.getsource(sm._scrape_keyword))
+    check("the run accumulates it across keywords",
+          "sieve_totals" in inspect.getsource(api.run_orchestrator_background))
+    route_sieve = (fe / "app" / "api" / "runs" / "[id]" / "route.js").read_text()
+    detail_sieve = (fe / "components" / "runs" / "RunDetail.js").read_text()
+    check("the proxy forwards it", "sieve_totals" in route_sieve)
+    check("and the run page shows fetched vs kept vs judged",
+          "sieve_totals" in detail_sieve and "passed filters" in detail_sieve
+          and "to AI" in detail_sieve)
 
 
 def main():
