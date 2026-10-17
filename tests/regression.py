@@ -25,6 +25,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import types
 from pathlib import Path
 
@@ -1855,6 +1856,137 @@ def test_progress_is_visible():
           "the run bar barely moves during one large keyword, which is the problem")
 
 
+def test_live_result_store():
+    """
+    A run's results are appended while it runs and written to disk ONCE at the end.
+
+    A JSON file cannot be appended to, so the file was rewritten after every judged
+    group — re-serialising everything already stored. Measured on a keyword
+    returning 1,400 ads: 2 MB of results, 95 MB written, because the 70th save
+    added 20 ads by rewriting 1,400. Streaming the harvest turned one save into
+    seventy.
+
+    Redis RPUSH is the same cost at any size, and Redis is a separate process, so
+    the staged copy outlives the app. That last part is the point: the idle
+    detector cannot recover a real crash, because it runs inside the app that
+    died. Whatever was staged is all that is left, so something has to sweep it
+    up on the next start.
+    """
+    print("\n[33] results are staged live, written once, and survive a crash")
+    import interface.main as api
+    import modules.orchestrator.main as om
+    import modules.storage.run_results as rr
+    import modules.storage.results as results_mod
+    from genesis.config import ADS_DIR
+    fe = Path(__file__).resolve().parents[1] / "frontend"
+
+    check("results are appended to Redis rather than merged into a file",
+          "append_results(run_id, buckets" in inspect.getsource(results_mod.record_results))
+    check("and the immediate write is kept only for callers with no run lifecycle",
+          "if run_id:" in inspect.getsource(results_mod.record_results)
+          and "_write_run_file_now" in inspect.getsource(results_mod))
+    check("a run opens its store when it starts",
+          "begin_run(" in inspect.getsource(api.run_orchestrator_background))
+
+    # ── staging costs nothing and writes nothing ────────────────────────────
+    rid = "run_regression_stage"
+    rr.begin_run(rid, "career_jobs")
+    run_file = ADS_DIR / "career_jobs" / f"{rid}.json"
+    for g in range(5):
+        rr.append_results(rid, {"accepted": [
+            {"ad_archive_id": f"s{g}-{i}", "ad_text": "x"} for i in range(20)]},
+            ["rust developer"])
+        check(f"no file after staging group {g + 1}", not run_file.exists()) \
+            if g == 4 else None
+    check("no file is written while the run is going", not run_file.exists(),
+          "the whole point — the file is not the live copy any more")
+    staged = rr.read_run(rid)
+    check("everything staged is there", len(staged["accepted"]) == 100,
+          f"{len(staged['accepted'])} staged")
+    check("and the keywords searched are remembered", staged["keywords"] == ["rust developer"])
+
+    # ── the end of the run writes once, then forgets ─────────────────────────
+    path = rr.write_run_file(rid, category="career_jobs", status="completed")
+    check("the run file is written when the run ends", bool(path))
+    check("with everything in it", len(json.loads(Path(path).read_text())["accepted"]) == 100)
+    check("and the outcome stamped in",
+          json.loads(Path(path).read_text()).get("status") == "completed")
+    check("then the staged copy is dropped, so it cannot drift from the file",
+          rr.read_run(rid) is None)
+
+    # ── a crash is recovered, because nothing else can recover it ────────────
+    crashed = "run_regression_crash"
+    rr.begin_run(crashed, "career_jobs")
+    rr.append_results(crashed, {"accepted": [
+        {"ad_archive_id": f"c{i}", "ad_text": "x"} for i in range(7)]})
+    check("a crashed run leaves its results in Redis, not on disk",
+          rr.read_run(crashed) is not None
+          and not (ADS_DIR / "career_jobs" / f"{crashed}.json").exists())
+    recovered = rr.sweep_orphaned_runs()
+    got = ADS_DIR / "career_jobs" / f"{crashed}.json"
+    check("the startup sweep brings them back", recovered >= 1 and got.exists())
+    check("marked partial, because that is what it is",
+          json.loads(got.read_text()).get("status") == "partial")
+    check("with every result intact",
+          len(json.loads(got.read_text())["accepted"]) == 7)
+
+    # ── a failed write must not cost us the run ──────────────────────────────
+    lost = "run_regression_failwrite"
+    rr.begin_run(lost, "career_jobs")
+    rr.append_results(lost, {"accepted": [{"ad_archive_id": "f1", "ad_text": "x"}]})
+    orig_mkdir = type(ADS_DIR).mkdir
+
+    def refuse(self, *a, **k):
+        if "no_such_category" in str(self):
+            raise OSError("simulated disk failure")
+        return orig_mkdir(self, *a, **k)
+
+    type(ADS_DIR).mkdir = refuse
+    try:
+        rr.write_run_file(lost, category="no_such_category", status="completed")
+        check("a write that fails raises rather than pretending", False,
+              "silently returning would look like success")
+    except OSError:
+        check("a write that fails raises rather than pretending", True)
+    finally:
+        type(ADS_DIR).mkdir = orig_mkdir
+    check("and the results survive it", rr.read_run(lost) is not None,
+          "clearing first would turn a disk error into a lost run")
+
+    # ── and the cost is flat, which was the whole reason ────────────────────
+    scale = "run_regression_scale"
+    rr.begin_run(scale, "career_jobs")
+    t0 = time.perf_counter()
+    for g in range(70):
+        rr.append_results(scale, {"accepted": [
+            {"ad_archive_id": f"w{g}-{i}", "ad_text": "x" * 200} for i in range(20)]})
+    elapsed = time.perf_counter() - t0
+    rr.write_run_file(scale, category="career_jobs", status="completed")
+    check("1400 ads stage in well under a second",
+          elapsed < 1.0, f"{elapsed:.3f}s for 70 groups")
+    check("where the old per-group rewrite took seconds and wrote 95 MB",
+          (ADS_DIR / "career_jobs" / f"{scale}.json").stat().st_size < 1_500_000,
+          f"{(ADS_DIR / 'career_jobs' / f'{scale}.json').stat().st_size // 1024} KB, written once")
+
+    for r in (rid, crashed, lost, scale):
+        rr.discard(r)
+
+    # ── and the results still reach the page while that is going ─────────────
+    # Deferring the write to the end of the run would otherwise leave the tiles
+    # and the accepted-ads table reading zero for the whole run, then filling in
+    # all at once. The judged rows are therefore streamed up into the run state
+    # as each group lands, and the route prefers them over the file while it is
+    # still running.
+    judged_src = inspect.getsource(om.harvested) if hasattr(om, "harvested") else ""
+    check("judged rows are passed up to the run state as each group lands",
+          'phase="judged"' in inspect.getsource(om._search_and_judge)
+          and "live_results" in inspect.getsource(api.run_orchestrator_background))
+    route_src = (fe / "app" / "api" / "runs" / "[id]" / "route.js").read_text()
+    check("the page reads them from there while the run is going",
+          "live_results" in route_src,
+          "the file does not exist until the run ends, so this is the only source")
+
+
 def main():
     print("═" * 62)
     print("  Tesserae regression — sandbox:", _SANDBOX)
@@ -1875,6 +2007,7 @@ def main():
     test_idle_run_is_stopped()
     test_streaming_harvest()
     test_progress_is_visible()
+    test_live_result_store()
 
     # Leave nothing behind. Safe because TESSERAE_REDIS_DB_OFFSET moved these
     # databases off the ones the app uses.

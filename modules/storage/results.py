@@ -17,6 +17,7 @@ from core import ADS_DIR, AdRelevanceVerdict, AdRecord
 
 from modules.profiles import deferred as deferred_store
 from modules.profiles import store as profile_store
+from modules.storage.run_results import append_results, begin_run
 from modules.verdicts import (
     FilterIndex as get_filter_index,
     record_accepted,
@@ -154,15 +155,47 @@ def record_results(
     run_path = cat_dir / (f"{run_id}.json" if run_id else f"run_{stamp}.json")
 
     accepted_entries = [ad.model_dump(mode="json") for ad in accepted]
-    payload = {
+    buckets = {
         "accepted": accepted_entries,
         "deferred": deferred,
         "judged_rejected": judged_rejects,
         "ai_failed": failed_ads,
-        "recorded_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    # One file per user-initiated run: merge into whatever this run wrote earlier.
+    if run_id:
+        # Staged in Redis, written once when the run ends.
+        #
+        # This used to rewrite the whole file after every judged group. JSON
+        # cannot be appended to, so each save re-serialised everything already
+        # stored: a keyword returning 1,400 ads wrote 95 MB to end up with 2 MB,
+        # and streaming the harvest turned one save into seventy. Redis RPUSH is
+        # the same cost at any size, and because Redis is a separate process the
+        # data outlives the app.
+        append_results(run_id, buckets, searched_keywords)
+    else:
+        # No run lifecycle to hang a final write off (CLI and legacy callers), so
+        # this still writes immediately and merges into its own earlier file.
+        _write_run_file_now(run_path, buckets, searched_keywords, stamp)
+
+    logger.info(
+        "🗄️ Verdicts recorded: %d accepted, %d deferred, %d judged-rejects, "
+        "%d AI-failures (%d newly marked)",
+        len(accepted), len(deferred), len(judged_rejects), len(failed_ads), newly_marked,
+    )
+    return {
+        "accepted": accepted,
+        "judged_rejects": judged_rejects,
+        "failed_ads": failed_ads,
+        "deferred": deferred,
+        "newly_marked": newly_marked,
+    }
+
+
+def _write_run_file_now(run_path, buckets: dict, searched_keywords, stamp: str) -> None:
+    """Merge-and-write, for callers with no run lifecycle to defer to."""
+    payload = {name: list(items or []) for name, items in buckets.items()}
+    payload["recorded_at"] = datetime.now(timezone.utc).isoformat()
+
     previous: dict = {}
     if run_path.exists():
         try:
@@ -172,12 +205,12 @@ def record_results(
             previous = {}
 
     if previous:
-        payload["accepted"] = _merge_by_ad_id(previous.get("accepted") or [], accepted_entries)
+        payload["accepted"] = _merge_by_ad_id(previous.get("accepted") or [],
+                                              payload["accepted"])
         # `previous.get(...) or []` keeps run files written before the deferred
         # bucket existed readable — they simply have nothing in it.
-        payload["deferred"] = (previous.get("deferred") or []) + deferred
-        payload["judged_rejected"] = (previous.get("judged_rejected") or []) + judged_rejects
-        payload["ai_failed"] = (previous.get("ai_failed") or []) + failed_ads
+        for name in ("deferred", "judged_rejected", "ai_failed"):
+            payload[name] = (previous.get(name) or []) + payload[name]
         # recorded_at stays the run's start, not this cycle's write time
         payload["recorded_at"] = previous.get("recorded_at") or payload["recorded_at"]
 
@@ -190,15 +223,3 @@ def record_results(
     payload["keywords"] = keywords
 
     run_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
-
-    logger.info(
-        "🗄️ Verdicts recorded: %d accepted, %d deferred, %d judged-rejects, "
-        "%d AI-failures (%d newly marked)",
-        len(accepted), len(deferred), len(judged_rejects), len(failed_ads), newly_marked,
-    )
-    return {
-        "accepted": accepted,
-        "judged_rejects": judged_rejects,
-        "failed_ads": failed_ads,
-        "newly_marked": newly_marked,
-    }

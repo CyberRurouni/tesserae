@@ -338,6 +338,18 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
         total = len(filters.keywords) * _keyword_targets(request)
         state["keywords"] = list(filters.keywords)
         state["total_keywords"] = total
+
+        # Open this run's live result store. From here until the run ends, judged
+        # ads are APPENDED to it rather than merged into a file that has to be
+        # rewritten whole every time — and because it lives in Redis, it survives
+        # this process dying, which is the crash that actually happens.
+        try:
+            from modules.storage.run_results import begin_run
+
+            begin_run(run_id, filters.category)
+        except Exception as exc:  # noqa: BLE001 - results must still work without Redis
+            logger.warning("⚠️ Live result store unavailable (%s) — results will be "
+                           "written when the run ends", exc)
         state["progress"] = 5
 
         # Resolve the profile before the orchestrator so the run state reports
@@ -432,6 +444,36 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
         def on_progress(**event):
             heartbeat()
             phase = event.get("phase")
+            if phase == "judged":
+                # The judged rows, kept in memory so the page can show them while
+                # the run is still going. The run file is written ONCE at the end,
+                # so until then this is the only place these rows exist for the
+                # browser — without it the tiles and the accepted-ads table would
+                # read zero for the whole run and then fill in all at once.
+                rows = event.get("rows") or {}
+                # Not setdefault: if the key somehow exists but is null, that
+                # returns None and the first .extend below raises — inside a
+                # progress callback, where the exception is swallowed and the
+                # page silently keeps showing nothing.
+                live = state.get("live_results")
+                if not isinstance(live, dict):
+                    live = state["live_results"] = {
+                        "accepted": [], "deferred": [],
+                        "judged_rejected": [], "ai_failed": [],
+                    }
+                for bucket in ("accepted", "deferred", "judged_rejected", "ai_failed"):
+                    incoming = rows.get(bucket) or []
+                    if incoming:
+                        live.setdefault(bucket, []).extend(incoming)
+                # `counts` is created here rather than reused: this branch runs
+                # before the harvest branch that would otherwise create it.
+                counts = state.setdefault(
+                    "counts", {"accepted": 0, "rejected": 0, "ai_failed": 0}
+                )
+                counts["accepted"] = len(live["accepted"])
+                counts["rejected"] = len(live["judged_rejected"])
+                counts["ai_failed"] = len(live["ai_failed"])
+                return
             if phase == "judging":
                 # Judging used to be the one long silent stretch, which made a
                 # working run look like a hung one. Say what it is doing, and let
@@ -536,14 +578,46 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
                 "Run %s did not search %d requested keyword(s): %s",
                 run_id, len(missed), missed,
             )
-        # Write the outcome into the run file so history is honest after a
-        # restart — otherwise a stopped run reads as "completed" forever.
-        _finalise_run_file(run_id, state.get("status", "completed"))
+        # The run is over, whatever the reason: assemble everything it judged
+        # into its file — ONCE — and drop the staged copy. Every terminal state
+        # comes through here, so a stopped or partial run keeps its results too.
+        _write_and_clear_run(run_id, state.get("status", "completed"),
+                             (filters.category if filters else None))
 
     except Exception as exc:  # noqa: BLE001 — surfaced to the UI via status
         logger.exception("Run %s failed", run_id)
         run_states[run_id].update(status="failed", error=str(exc), completed_at=datetime.now().isoformat())
-        _finalise_run_file(run_id, "failed")
+        _write_and_clear_run(run_id, "failed", None)
+
+
+def _write_and_clear_run(run_id: str, status: str, category: str | None = None) -> None:
+    """
+    Write the run's staged results to disk, then forget them.
+
+    The staged copy is dropped ONLY after the write is confirmed. A disk error
+    here is recoverable — retrying, or the startup sweep, still has the data —
+    whereas clearing first would turn a recoverable error into a lost run. If the
+    write does fail we say so loudly, because "nothing was written" and "written
+    and cleared" are the two outcomes a user cares about most and must not be
+    confused for one another.
+    """
+    try:
+        from modules.storage.run_results import write_run_file
+
+        path = write_run_file(run_id, category=category, status=status)
+        if path:
+            _finalise_run_file(run_id, status)
+        else:
+            # Nothing staged — a run that found no ads. No empty file, and no
+            # key left behind either.
+            from modules.storage.run_results import discard
+
+            discard(run_id)
+    except Exception:  # noqa: BLE001 — never let the epilogue mask the run's outcome
+        logger.error(
+            "💥 Could not write results for run %s. They are still staged in Redis "
+            "and will be recovered on the next start.", run_id, exc_info=True,
+        )
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────
@@ -922,6 +996,28 @@ def configure_logging() -> None:
 
 
 configure_logging()
+
+
+def _recover_interrupted_runs() -> None:
+    """
+    Turn results left in Redis by a dead process back into results you can see.
+
+    This runs at import, before the app serves anything, and it is the ONLY path
+    back from a real crash. The idle detector cannot cover that case: it lives
+    inside the app, so a crashed app has nothing left running to notice anything.
+    Whatever was staged is simply still in Redis, and this is what writes it out —
+    stamped `partial`, which is exactly what it is: the run did not finish, and
+    everything it had found was kept and judged.
+    """
+    try:
+        from modules.storage.run_results import sweep_orphaned_runs
+
+        sweep_orphaned_runs()
+    except Exception as exc:  # noqa: BLE001 - a failed sweep must not stop the app
+        logger.warning("⚠️ Could not recover interrupted runs (%s)", exc)
+
+
+_recover_interrupted_runs()
 
 
 if __name__ == "__main__":

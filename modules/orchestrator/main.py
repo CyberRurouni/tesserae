@@ -488,7 +488,9 @@ async def _search_and_judge(
             if ad.source_keyword in relevant_by_kw:
                 relevant_by_kw[ad.source_keyword] += 1
         judged_total += len(summary["accepted"])
-        return len(summary["accepted"])
+        # The rows, not just the count. The run file is written once at the end,
+        # so this is what gets the judged ads to the screen while the run goes on.
+        return summary
 
     async def harvested(batch, keyword, total_unique):
         if on_progress:
@@ -499,7 +501,34 @@ async def _search_and_judge(
                     await result
             except Exception as exc:  # noqa: BLE001 - progress must never break a run
                 logger.warning("⚠️ Progress reporting failed (%s) — continuing", exc)
-        return await judge_batch(batch, keyword)
+        summary = await judge_batch(batch, keyword)
+        # Pass the judged rows up so the page can show them NOW.
+        #
+        # The run file is written once, when the run ends — it is a record of a
+        # finished run, not the live copy. So while the run is going, this is the
+        # only route those rows have to the screen, and without it the tiles and
+        # the accepted-ads table would read zero for the entire run and then
+        # suddenly fill in at the end.
+        if on_progress and summary:
+            try:
+                # Accepted ads come back as records; the rest are already the
+                # plain dicts the file stores. Both are flattened here so the
+                # page gets exactly the shape the finished file will have.
+                rows = {
+                    "accepted": [
+                        a.model_dump(mode="json") for a in summary.get("accepted") or []
+                    ],
+                    "deferred": summary.get("deferred") or [],
+                    "judged_rejected": summary.get("judged_rejects") or [],
+                    "ai_failed": summary.get("failed_ads") or [],
+                }
+                result = on_progress(phase="judged", keyword=keyword,
+                                     batch_size=len(batch), rows=rows)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception as exc:  # noqa: BLE001 - progress must never break a run
+                logger.warning("⚠️ Judged-row reporting failed (%s) — continuing", exc)
+        return summary
 
     ads = await run_scrape(
         filters,

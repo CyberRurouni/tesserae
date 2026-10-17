@@ -93,7 +93,21 @@ export async function GET(request, { params }) {
       ? readRunFile(found)
       : { accepted: [], judgedRejected: [], aiFailed: [], deferred: [], fileKeywords: [], recordedAt: null };
 
-    const { accepted, judgedRejected, aiFailed, deferred } = saved;
+    // While a run is going its results live in memory, not in a file: the file
+    // is written once when the run ends. Without this the tiles and the
+    // accepted-ads table would read zero for the entire run and then fill in all
+    // at once — which is precisely what happened before results were streamed up
+    // here.
+    const liveResults = live?.live_results || null;
+    const { accepted, judgedRejected, aiFailed, deferred } =
+      liveResults && !found
+        ? {
+            accepted: liveResults.accepted || [],
+            judgedRejected: liveResults.judged_rejected || [],
+            aiFailed: liveResults.ai_failed || [],
+            deferred: liveResults.deferred || [],
+          }
+        : saved;
 
     // A saved result file means the run is over, whatever the backend says.
     const status = live?.status || (found ? 'completed' : 'pending');
