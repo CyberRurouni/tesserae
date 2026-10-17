@@ -15,8 +15,11 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import socket
+import subprocess
 import sys
+import time
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -65,7 +68,7 @@ app.add_middleware(
 # In-memory run state (polled by the frontend while a run is in flight)
 run_states: dict[str, dict[str, Any]] = {}
 
-TERMINAL_STATES = {"completed", "failed", "cancelled", "abandoned"}
+TERMINAL_STATES = {"completed", "failed", "cancelled", "abandoned", "partial"}
 
 # How long a run may go without any sign of life before it is assumed dead and
 # the pipeline is handed to whoever asks next.
@@ -117,10 +120,31 @@ def live_run() -> tuple[str, dict] | None:
             state["completed_at"] = now.isoformat()
             state["error"] = (
                 f"No progress for {int(idle // 60)} minutes — the run is not "
-                "believed to still be running, so the pipeline was released."
+                "believed to still be running, so it was stopped and the "
+                "pipeline released."
             )
-            logger.warning("⛔ Run %s abandoned after %d idle minute(s) — releasing the pipeline",
-                           run_id, idle // 60)
+            # Stop it, don't just rename it.
+            #
+            # Marking the state alone left the crawl running: nothing held a
+            # handle to the task, and the only stop signal in the system is this
+            # flag. So an "abandoned" run went on crawling Meta while the UI
+            # reported it dead, a second run was free to start beside it on the
+            # one browser profile, and when it finally finished it overwrote its
+            # own status with "completed" — a run reported dead turning into a
+            # run reported successful, with its results mixed in.
+            #
+            # Setting the flag routes it through the same cooperative stop the
+            # Stop button uses: it breaks at the next scroll step, keeps every ad
+            # it collected, judges those, saves them, and closes the browser
+            # cleanly. `stop_reason` is what lets the end of the run report this
+            # as its own outcome instead of borrowing "cancelled".
+            state["cancel_requested"] = True
+            state["stop_reason"] = "idle_timeout"
+            logger.warning(
+                "⛔ Run %s idle for %d minute(s) — stopping it and releasing the "
+                "pipeline. Whatever it collected is kept and judged.",
+                run_id, idle // 60,
+            )
             continue
         return run_id, state
     return None
@@ -302,7 +326,11 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
             status="running",
             started_at=state.get("started_at") or started.isoformat(),
             last_progress_at=started.isoformat(),
-            cancel_requested=False,
+            # Defaulted, never reset. This used to be a hard `False`, which threw
+            # away a stop that arrived in the window between the run being
+            # accepted and this task starting — the user pressed Stop, the flag
+            # was set, and the run began anyway and could not be stopped at all.
+            cancel_requested=bool(state.get("cancel_requested")),
             error=None,
         )
 
@@ -404,6 +432,22 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
         def on_progress(**event):
             heartbeat()
             phase = event.get("phase")
+            if phase == "judging":
+                # Judging used to be the one long silent stretch, which made a
+                # working run look like a hung one. Say what it is doing, and let
+                # the heartbeat above keep the idle detector honest.
+                keyword = event.get("keyword")
+                if keyword:
+                    state["current_keyword"] = keyword
+                judged = int(event.get("judged") or 0)
+                judging_total = int(event.get("judging_total") or 0)
+                state["phase"] = "judging"
+                state["ads_judged"] = judged
+                state["ads_judging_total"] = judging_total
+                logger.info(
+                    "⚖️  %r: judged %d/%d ad(s)", keyword or "-", judged, judging_total,
+                )
+                return
             if phase == "harvested":
                 keyword = event.get("keyword")
                 state["current_keyword"] = keyword
@@ -452,9 +496,26 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
         counts["rejected"] = int(summary.get("rejected_ads", 0) or 0)
 
         stopped = bool(state.get("cancel_requested"))
+        # Why it stopped, in the run's own words. "We gave up waiting" and "the
+        # user pressed Stop" both stop a run, but only one of them is a fault,
+        # and a status that cannot tell them apart is worse than no status: it
+        # teaches you to read a healthy finish as a problem.
+        stop_reason = state.get("stop_reason")
+        if stop_reason == "idle_timeout":
+            final_status = "partial"
+            state["error"] = (
+                f"Stopped after {STALE_RUN_SECONDS // 60} minutes with no progress. "
+                "Everything collected before that point was judged and saved — "
+                "this is a partial result, not a failed one."
+            )
+        elif stopped:
+            final_status = "cancelled"
+        else:
+            final_status = "completed"
         state.update(
-            status="cancelled" if stopped else "completed",
-            progress=100,
+            status=final_status,
+            stop_reason=stop_reason,
+            progress=100 if final_status != "partial" else state.get("progress", 0),
             cycles=summary.get("cycles"),
             keywords_searched=summary.get("keywords_searched"),
             completed_at=datetime.now().isoformat(),
@@ -716,16 +777,91 @@ async def save_config(config: ConfigRequest):
     return {"status": "saved"}
 
 
-def find_free_port(start_port: int = 8000, max_port: int = 9000) -> int:
-    """Return the first free TCP port in [start_port, max_port]."""
-    for port in range(start_port, max_port + 1):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-                probe.bind(("", port))
-                return port
-        except OSError:
+def _listeners_on(port: int) -> list[tuple[int, str]]:
+    """(pid, command) for every process listening on `port`. Empty if none."""
+    try:
+        out = subprocess.run(
+            ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-F", "pcn"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("⚠️ Could not inspect port %d (%s)", port, exc)
+        return []
+    found: list[tuple[int, str]] = []
+    pid = None
+    for line in out.splitlines():
+        if line.startswith("p"):
+            try:
+                pid = int(line[1:])
+            except ValueError:
+                pid = None
+        elif line.startswith("c") and pid is not None:
+            found.append((pid, line[1:]))
+    return found
+
+
+def reclaim_port(port: int = 8000, wait_s: float = 10.0) -> int:
+    """
+    Take `port`, evicting whatever is squatting on it.
+
+    This used to walk forward to the next free port instead, which was worse
+    than useless: the frontend is pinned to 8000 (frontend/next.config.js), so a
+    backend that quietly moved to 8001 left the browser talking to 8001's
+    *absent* predecessor — the stale server from the previous run. The port
+    conflict did not go away; it was hidden behind a working-looking page.
+
+    Evicting is the honest repair, and it is also complete: the process holding
+    8000 is the previous Tesserae, and killing it takes its Chromium with it
+    (Playwright's browser dies with the driver), so the profile lock, the
+    half-finished run and the crawl in flight all go at once. That was measured,
+    not assumed — see the notes in PROBLEMS.md.
+
+    Refuses to guess. If the holder cannot be identified, or survives the kill,
+    this raises instead of moving ports, because a backend on an unexpected port
+    is the exact failure being fixed here.
+    """
+    listeners = _listeners_on(port)
+    if not listeners:
+        return port
+
+    for pid, command in listeners:
+        if pid == os.getpid():
             continue
-    raise RuntimeError(f"No free ports in range {start_port}-{max_port}")
+        logger.warning(
+            "🔌 Port %d is held by pid %d (%s) — stopping it and taking the port",
+            port, pid, command,
+        )
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+        except PermissionError as exc:
+            raise RuntimeError(
+                f"Port {port} is held by pid {pid} ({command}) and we may not "
+                f"stop it: {exc}. Stop it yourself and relaunch."
+            ) from exc
+
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        if not _listeners_on(port):
+            logger.warning("🔌 Port %d reclaimed", port)
+            return port
+        time.sleep(0.25)
+
+    for pid, command in _listeners_on(port):
+        logger.warning("🔌 pid %d (%s) ignored SIGTERM — sending SIGKILL", pid, command)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    time.sleep(0.5)
+    if _listeners_on(port):
+        raise RuntimeError(
+            f"Port {port} is still held after evicting its owner. Refusing to "
+            f"start on a different port — the frontend expects {port}."
+        )
+    logger.warning("🔌 Port %d reclaimed", port)
+    return port
 
 
 def configure_logging() -> None:
@@ -791,6 +927,6 @@ configure_logging()
 if __name__ == "__main__":
     import uvicorn
 
-    port = find_free_port(8000)
+    port = reclaim_port(8000)
     print(f"Tesserae API listening on http://localhost:{port}")
     uvicorn.run(app, host="0.0.0.0", port=port)

@@ -6,6 +6,10 @@ export const STATUS_STYLES = {
   cancelling: 'bg-warning/15 text-warning border-warning/40',
   cancelled: 'bg-muted text-muted-foreground border-border',
   abandoned: 'bg-muted text-muted-foreground border-border',
+  // Partial is a success with a caveat, not a failure: the run stopped early but
+  // everything it found was judged and saved. Warning-toned so it is not missed,
+  // but it must not read as "Failed" — that is what trained us to ignore these.
+  partial: 'bg-warning/15 text-warning border-warning/40',
   pending: 'bg-muted text-muted-foreground border-border',
 };
 
@@ -17,6 +21,7 @@ export const STATUS_LABELS = {
   cancelling: 'Stopping…',
   cancelled: 'Stopped',
   abandoned: 'Lost',
+  partial: 'Partial',
   pending: 'Waiting',
 };
 

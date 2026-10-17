@@ -27,6 +27,7 @@ Contract:
 
 import asyncio
 import logging
+from typing import Awaitable, Callable, Optional
 
 from core import (
     AIClient,
@@ -281,6 +282,7 @@ async def judge_ad_relevance(
     additional_filters: str | None = None,
     profile_text: str | None = None,
     request_id: str | None = None,
+    on_batch: Optional[Callable[[int], Awaitable[None]]] = None,
 ) -> dict[str, AdRelevanceVerdict]:
     """
     Checkpoint (a): judge every ad in two stages — against the profile (about
@@ -291,6 +293,14 @@ async def judge_ad_relevance(
     fail-closed rejects). Ads are grouped by category, packed into
     batches of `batch_size`, with at most `max_concurrent` calls in
     flight — the rest wait their turn.
+
+    `on_batch` is awaited after each batch lands, with that batch's size. It
+    exists because judging is the one long phase that reports nothing: the
+    crawl ticks on every scroll, but a keyword that yields 500 ads then goes
+    quiet for minutes while the model works. Nothing on screen can tell that
+    apart from a hung run, and the idle detector used to act on the difference.
+    `on_batch` is that missing tick, and it is optional so nothing else has to
+    care about it.
     """
     if not ads:
         return {}
@@ -325,10 +335,20 @@ async def judge_ad_relevance(
         batch_no: int, description: str, batch: list[AdRecord]
     ) -> dict[str, AdRelevanceVerdict]:
         async with gate:
-            return await _judge_batch(
-                client, batch, batch_no, description, additional_filters,
-                profile_text, request_id,
-            )
+            try:
+                return await _judge_batch(
+                    client, batch, batch_no, description, additional_filters,
+                    profile_text, request_id,
+                )
+            finally:
+                # In a finally, so a batch that raises still counts as motion.
+                # A run that dies mid-judging is exactly the case the tick is
+                # for, and swallowing the failure to report it would defeat it.
+                if on_batch is not None:
+                    try:
+                        await on_batch(len(batch))
+                    except Exception:  # noqa: BLE001 - a tick must never break judging
+                        logger.debug("⚠️ judging progress tick failed", exc_info=True)
 
     results = await asyncio.gather(
         *(

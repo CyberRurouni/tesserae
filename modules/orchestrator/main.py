@@ -437,6 +437,29 @@ async def _search_and_judge(
         if not ads:
             return 0
 
+        # Judging is long and used to be mute. A keyword can now send hundreds
+        # of ads to the model, and the crawl's per-scroll tick stops the moment
+        # scrolling stops — so a run doing exactly the right thing looked
+        # identical to a run that had hung. Ticking per batch is what lets the
+        # idle detector tell those apart, and it doubles as the "judging 120 of
+        # 480" line on the screen.
+        _judged_done = 0
+
+        async def _tick(batch_ads: int) -> None:
+            nonlocal _judged_done
+            _judged_done += batch_ads
+            if on_progress is None:
+                return
+            try:
+                on_progress(
+                    phase="judging",
+                    keyword=keyword,
+                    judged=_judged_done,
+                    judging_total=len(ads),
+                )
+            except Exception:  # noqa: BLE001 - progress must never break judging
+                logger.debug("⚠️ judging progress tick failed", exc_info=True)
+
         verdicts = await judge_ad_relevance(
             ads,
             batch_size=config.judge_batch_size,
@@ -454,6 +477,7 @@ async def _search_and_judge(
             # two different people.
             profile_text=config.profile.background,
             request_id=config.request_id,
+            on_batch=_tick,
         )
         summary = record_results(
             ads, verdicts, config.filters.category, config.filters,

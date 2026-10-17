@@ -1591,6 +1591,88 @@ def test_patience():
           "ABORTED" in src and "promised_but_stalled" in src)
 
 
+def test_idle_run_is_stopped():
+    """
+    A run declared dead has to actually be dead.
+
+    Marking the state was all this used to do. Nothing held a handle to the
+    task and the only stop signal in the system is a flag, so an "abandoned"
+    run kept crawling Meta while the UI called it dead, a second run was free
+    to start beside it on the one browser profile, and when it finished it
+    overwrote its own status with "completed".
+
+    It is also the status most likely to fire by accident. Judging used to be
+    mute, and a keyword that yields hundreds of ads goes minutes without a word
+    — so a run doing exactly the right thing looked identical to a hung one.
+    Both halves are pinned here.
+    """
+    print("\n[30] an idle run is stopped, and stopping it is not the same as Stop")
+    from datetime import datetime, timedelta
+
+    import interface.main as api
+    import modules.orchestrator.main as om
+    from modules.checkpoints import relevance as R
+
+    # ── judging reports in ───────────────────────────────────────────────────
+    src = inspect.getsource(R.judge_ad_relevance)
+    check("judging can report progress", "on_batch" in inspect.signature(R.judge_ad_relevance).parameters)
+    check("and reports it after each batch, not only at the end",
+          "on_batch(len(batch))" in src)
+    check("a batch that raises still counts as motion",
+          "finally:" in src.split("async def _run")[1][:600],
+          "a run that dies mid-judging is exactly the case the tick is for")
+
+    check("the orchestrator passes a tick into judging",
+          "on_batch=_tick" in inspect.getsource(om._search_and_judge))
+
+    # ── the idle path stops the run ─────────────────────────────────────────
+    api.run_states.clear()
+    now = datetime.now()
+    api.run_states["run_idle"] = {
+        "id": "run_idle", "status": "running",
+        "started_at": now.isoformat(),
+        "last_progress_at": (now - timedelta(minutes=30)).isoformat(),
+        "cancel_requested": False,
+    }
+    check("a silent run is released", api.live_run() is None)
+    st = api.run_states["run_idle"]
+    check("and is told to stop, not merely renamed",
+          st.get("cancel_requested") is True,
+          "without this it kept crawling while the UI reported it dead")
+    check("with the reason recorded, so the ending can be honest",
+          st.get("stop_reason") == "idle_timeout")
+    check("partial is terminal, or the run would hold the pipeline forever",
+          "partial" in api.TERMINAL_STATES)
+
+    # ── the ending distinguishes the two kinds of stop ───────────────────────
+    bg = inspect.getsource(api.run_orchestrator_background)
+    check("an idle stop is reported as partial, not cancelled",
+          'stop_reason == "idle_timeout"' in bg and '"partial"' in bg)
+    check("and it says the results were kept",
+          "was judged and saved" in bg)
+    check("a user-pressed Stop is still reported as cancelled",
+          '"cancelled"' in bg)
+
+    # ── the port is taken, not dodged ────────────────────────────────────────
+    check("the app no longer walks forward to another port",
+          not hasattr(api, "find_free_port"),
+          "the frontend is pinned to 8000, so a backend on 8001 is talked past")
+    check("and evicts the holder instead", hasattr(api, "reclaim_port"))
+    check("a free port is simply returned", api.reclaim_port(0) == 0)
+    check("the evicter refuses to guess rather than move ports",
+          "Refusing to" in inspect.getsource(api.reclaim_port))
+
+    # ── the frontend knows the word ──────────────────────────────────────────
+    fe = (Path(__file__).resolve().parents[1] / "frontend")
+    runs_js = (fe / "lib" / "runs.js").read_text()
+    shared_js = (fe / "components" / "runs" / "shared.js").read_text()
+    check("the frontend treats partial as finished",
+          "'partial'" in runs_js)
+    check("and does not label it a failure",
+          "partial: 'Partial'" in shared_js and "partial: 'Failed'" not in shared_js,
+          "a healthy finish reported as Failed is how warnings get ignored")
+
+
 def main():
     print("═" * 62)
     print("  Tesserae regression — sandbox:", _SANDBOX)
@@ -1608,6 +1690,7 @@ def main():
     test_cancellation()
     test_bulk_reader()
     test_patience()
+    test_idle_run_is_stopped()
 
     # Leave nothing behind. Safe because TESSERAE_REDIS_DB_OFFSET moved these
     # databases off the ones the app uses.
