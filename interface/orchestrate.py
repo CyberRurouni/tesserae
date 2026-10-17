@@ -76,6 +76,8 @@ async def _run_with_filters(
     harvest_limit: int = 20,
     harvest_keywords: list[str] | None = None,
     on_progress=None,
+    should_stop=None,
+    on_step=None,
 ) -> dict:
     """Run the orchestrator with the given filters and return the summary.
 
@@ -107,6 +109,8 @@ async def _run_with_filters(
         profile_id=profile_id,
         request_id=request_id,
         on_progress=on_progress,
+        should_stop=should_stop,
+        on_step=on_step,
     )
     return summary
 

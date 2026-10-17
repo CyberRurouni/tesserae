@@ -9,7 +9,7 @@
  */
 
 /** Statuses after which no further polling is useful. */
-export const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'];
+export const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled', 'abandoned'];
 
 export const isTerminalStatus = (status) => TERMINAL_STATUSES.includes(status);
 

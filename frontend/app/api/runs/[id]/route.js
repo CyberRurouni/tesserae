@@ -42,6 +42,30 @@ function readRunFile(found) {
   }
 }
 
+/**
+ * Cooperative stop. The run notices on its next scroll step (~3s), unwinds
+ * cleanly, and everything it had already collected is judged and saved first —
+ * so this is safe to press at any moment.
+ */
+export async function POST(request, { params }) {
+  const { id } = await params;
+  try {
+    const res = await fetch(`${PYTHON_BACKEND}/api/runs/${id}/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+    });
+    const text = await res.text();
+    return new NextResponse(text, {
+      status: res.status,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (error) {
+    console.error('Cancel failed:', error);
+    return NextResponse.json({ error: 'Cannot reach the Tesserae backend. Is it running?' }, { status: 503 });
+  }
+}
+
 export async function GET(request, { params }) {
   const { id } = await params;
 

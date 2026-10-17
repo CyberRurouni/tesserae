@@ -101,9 +101,18 @@ async def run_orchestrator(
     profile_id: str | None = None,
     request_id: str | None = None,
     on_progress=None,
+    should_stop=None,
+    on_step=None,
 ) -> dict:
     """
     Run the keyword lifecycle.
+
+    `should_stop` is polled between keywords, between cycles, and every scroll
+    step inside a keyword (see modules/scraper). It always unwinds by returning,
+    never by raising, so a stopped run is indistinguishable from a finished one
+    except for its status — which is what makes it safe to expose a Stop button.
+    A stopped keyword still has its collected ads judged and saved.
+    `on_step` reports per-scroll liveness.
 
     run_mode:
       - "existing": search provided keywords ONCE, then STOP (no AI, no cycles)
@@ -169,6 +178,7 @@ async def run_orchestrator(
                 relevant, _, _ = await _search_and_judge(
                     user_keywords, config, additional_filters, context, run_id,
                     searched_keywords, run_seen, on_progress,
+                    should_stop=should_stop, on_step=on_step,
                 )
                 totals["cycles"] = 1
                 totals["keywords_searched"] += len(user_keywords)
@@ -184,6 +194,11 @@ async def run_orchestrator(
         provided_pending = bool(user_keywords)
 
         while True:
+            if should_stop is not None and should_stop():
+                logger.info("🛑 Stopped before the next cycle — %d cycle(s), %d keyword(s), %d lead(s)",
+                             totals["cycles"], totals["keywords_searched"], totals["relevant_ads"])
+                return totals
+
             live = coll.load_collection(category_id, config.profile_id)
             # Everything we have ever searched — the generator's memory, and the
             # pool the keyword leaderboard is ranked from.
@@ -227,6 +242,7 @@ async def run_orchestrator(
                 relevant, _, _ = await _search_and_judge(
                     round_keywords, config, additional_filters, context, run_id,
                     searched_keywords, run_seen, on_progress,
+                    should_stop=should_stop, on_step=on_step,
                 )
                 totals["cycles"] += 1
                 totals["keywords_searched"] += len(round_keywords)
@@ -267,6 +283,7 @@ async def run_orchestrator(
             relevant, ads_by_kw, relevant_by_kw = await _search_and_judge(
                 search_array, config, additional_filters, context, run_id,
                 searched_keywords, run_seen, on_progress,
+                should_stop=should_stop, on_step=on_step,
             )
             totals["cycles"] += 1
             totals["keywords_searched"] += len(search_array)
@@ -299,6 +316,18 @@ async def run_orchestrator(
                     s.keyword, days, t.reason if t else "default",
                     saved.runs_searched, saved.ads_fetched, saved.relevant_ads,
                 )
+
+            # A stopped run has already had its keyword timings written, so the
+            # evidence from this partial run is kept. It stops HERE rather than
+            # compressing the pool or generating another batch — the point of
+            # pressing stop is that nothing more happens.
+            if should_stop is not None and should_stop():
+                logger.info(
+                    "🛑 Run stopped — %d cycle(s), %d keyword(s) searched, %d lead(s). "
+                    "Everything collected has been judged and saved.",
+                    totals["cycles"], totals["keywords_searched"], totals["relevant_ads"],
+                )
+                return totals
 
             # ---------------- THRESHOLD -> COVERAGE REVIEW ----------------
             live = coll.load_collection(category_id, config.profile_id)
@@ -370,6 +399,8 @@ async def _search_and_judge(
     searched_keywords: list[str] | None = None,
     run_seen: RunSeenIds | None = None,
     on_progress=None,
+    should_stop=None,
+    on_step=None,
 ) -> tuple[int, dict[str, int], dict[str, int]]:
     """
     Scrape and judge `keywords`, judging and saving each keyword as it lands.
@@ -459,6 +490,8 @@ async def _search_and_judge(
         request_id=config.request_id,
         parallel_workers=config.parallel_workers,
         on_harvested=harvested if on_progress is not None else None,
+        should_stop=should_stop,
+        on_step=on_step,
     )
 
     # Keywords that produced nothing are still counted as searched, and any ads

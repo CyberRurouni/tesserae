@@ -77,6 +77,8 @@ function KeywordChip({ entry }) {
 
 export function RunDetail({ runId }) {
   const [run, setRun] = useState(null);
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState(null);
   const [loading, setLoading] = useState(true);
   const [missing, setMissing] = useState(false);
   // The poll loop reads its bookkeeping from a ref, but `run`/`missing` are
@@ -137,6 +139,25 @@ export function RunDetail({ runId }) {
     const timer = setInterval(fetchData, POLL_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [fetchData, run, missing]);
+
+  // Stop is cooperative: the backend sets a flag and the run unwinds on its next
+  // scroll step, judging and saving everything it had already collected. So the
+  // button stays disabled while stopping rather than vanishing — the point is
+  // to see it finish cleanly, not to wonder if it worked.
+  const stopRun = useCallback(async () => {
+    setStopping(true);
+    setStopError(null);
+    try {
+      const res = await fetch(`/api/runs/${runId}/cancel`, { method: 'POST' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body.error || body.detail || 'Could not stop the search');
+      setRun((prev) => (prev ? { ...prev, status: 'cancelling' } : prev));
+      fetchData();
+    } catch (error) {
+      setStopError(error.message);
+      setStopping(false);
+    }
+  }, [runId, fetchData]);
 
   const checkAgain = () => {
     pollRef.current = newPollState();
@@ -240,8 +261,31 @@ export function RunDetail({ runId }) {
             {isLive && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" aria-hidden="true" />}
             {STATUS_LABELS[status] || status}
           </span>
+          {isLive && (
+            <Button
+              variant="outline"
+              onClick={stopRun}
+              loading={stopping || status === 'cancelling'}
+              disabled={stopping || status === 'cancelling'}
+            >
+              {status === 'cancelling' ? 'Stopping…' : 'Stop search'}
+            </Button>
+          )}
         </div>
       </header>
+
+      {stopError && (
+        <div className="rounded-xl border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive" role="alert">
+          {stopError}
+        </div>
+      )}
+
+      {status === 'cancelled' && (
+        <div className="rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground" role="status">
+          You stopped this search. Everything it had found was still judged and saved below —
+          only the ads it had not reached yet were missed.
+        </div>
+      )}
 
       {(run.error || (status === 'failed' && !run.error)) && (
         <div className="rounded-xl border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive" role="alert">

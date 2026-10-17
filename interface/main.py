@@ -26,6 +26,8 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 
+from genesis.config import ADS_DIR
+
 from interface import log_buffer
 from interface.profiles_api import router as profiles_router
 from interface.heuristics_api import router as heuristics_router
@@ -44,7 +46,11 @@ ROOT = Path(__file__).resolve().parent.parent
 # them somewhere harmless.
 LOG_FILE = Path(os.getenv("TESSERAE_LOG_FILE") or (ROOT / "logs" / "tesserae.log"))
 
-DATA_DIR = ROOT / "data" / "ads"
+# Where run result files live. Read from genesis rather than recomputed from the
+# repo root: two definitions of the same directory is how a run ends up written
+# in one place and looked for in another, which is exactly what stopped a
+# cancelled run from recording its own outcome.
+DATA_DIR = ADS_DIR
 
 app = FastAPI(title="Tesserae API", version="1.0.0")
 
@@ -59,7 +65,65 @@ app.add_middleware(
 # In-memory run state (polled by the frontend while a run is in flight)
 run_states: dict[str, dict[str, Any]] = {}
 
-TERMINAL_STATES = {"completed", "failed", "cancelled"}
+TERMINAL_STATES = {"completed", "failed", "cancelled", "abandoned"}
+
+# How long a run may go without any sign of life before it is assumed dead and
+# the pipeline is handed to whoever asks next.
+#
+# Judging happens once per keyword, so before the per-scroll tick existed a
+# single keyword on a big list could legitimately run for ten minutes without a
+# single progress event — which would make any threshold here a guess. The run
+# now reports on every scroll step, so this is measured against real motion.
+STALE_RUN_SECONDS = 600
+
+
+def _beat(run_id: str) -> datetime:
+    """
+    When this run last did anything, as a datetime. Never raises.
+
+    These are stored as ISO strings (they are echoed to the browser), so they
+    are parsed back here rather than kept in a second form that can drift out
+    of step with what the UI shows.
+    """
+    state = run_states.get(run_id) or {}
+    raw = state.get("last_progress_at") or state.get("started_at")
+    if isinstance(raw, datetime):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            pass
+    return datetime.now()
+
+
+def live_run() -> tuple[str, dict] | None:
+    """
+    The run that currently owns the pipeline, if any.
+
+    A run that has stopped reporting is declared `abandoned` and released, so a
+    crash mid-crawl cannot lock the app out of searching forever. This is the
+    only gate on concurrency: two runs would fight over the one browser profile
+    directory (Chromium locks it), double the captcha exposure the single
+    session exists to avoid, and interleave their logs into nonsense.
+    """
+    now = datetime.now()
+    for run_id, state in list(run_states.items()):
+        if state.get("status") in TERMINAL_STATES:
+            continue
+        idle = (now - _beat(run_id)).total_seconds()
+        if idle > STALE_RUN_SECONDS:
+            state["status"] = "abandoned"
+            state["completed_at"] = now.isoformat()
+            state["error"] = (
+                f"No progress for {int(idle // 60)} minutes — the run is not "
+                "believed to still be running, so the pipeline was released."
+            )
+            logger.warning("⛔ Run %s abandoned after %d idle minute(s) — releasing the pipeline",
+                           run_id, idle // 60)
+            continue
+        return run_id, state
+    return None
 
 
 # ── Schemas ────────────────────────────────────────────────────────────────
@@ -233,9 +297,12 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
     """Execute the orchestrator, updating the polled run state as it goes."""
     state = run_states.setdefault(run_id, {"id": run_id})
     try:
+        started = datetime.now()
         state.update(
             status="running",
-            started_at=state.get("started_at") or datetime.now().isoformat(),
+            started_at=state.get("started_at") or started.isoformat(),
+            last_progress_at=started.isoformat(),
+            cancel_requested=False,
             error=None,
         )
 
@@ -317,7 +384,25 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
         # is happening right now — keyword, ads harvested so far — and the UI
         # polls it. Without this there is no way to tell "working" from
         # "stuck" except by watching a browser tab.
+        def heartbeat():
+            """Any sign of life at all refreshes the stale-run clock."""
+            state["last_progress_at"] = datetime.now().isoformat()
+
+        def on_step(**event):
+            # Per scroll step, from inside the crawl. This is what makes a long
+            # keyword legible (cards seen against Meta's estimate) and what
+            # stops the stale-run threshold from being a guess.
+            heartbeat()
+            state["current_keyword"] = event.get("keyword")
+            state["phase"] = "scraping"
+            state["cards_seen"] = event.get("cards_seen")
+            state["cards_target"] = event.get("target")
+            state["ads_collected"] = event.get("ads_collected")
+            state["estimate"] = event.get("estimate")
+            state["scroll_steps"] = event.get("steps")
+
         def on_progress(**event):
+            heartbeat()
             phase = event.get("phase")
             if phase == "harvested":
                 keyword = event.get("keyword")
@@ -355,14 +440,20 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
             harvest_limit=max(0, int(request.harvest_limit or 0)),
             harvest_keywords=request.harvest_keywords or None,
             on_progress=on_progress,
+            on_step=on_step,
+            # Read by the run itself, not by this function: a cooperative stop
+            # that the crawl polls on its next scroll step, rather than a task
+            # cancelled underneath it mid-await.
+            should_stop=lambda: bool(run_states.get(run_id, {}).get("cancel_requested")),
         )
 
         counts = state.setdefault("counts", {"accepted": 0, "rejected": 0, "ai_failed": 0})
         counts["accepted"] = int(summary.get("relevant_ads", 0))
         counts["rejected"] = int(summary.get("rejected_ads", 0) or 0)
 
+        stopped = bool(state.get("cancel_requested"))
         state.update(
-            status="completed",
+            status="cancelled" if stopped else "completed",
             progress=100,
             cycles=summary.get("cycles"),
             keywords_searched=summary.get("keywords_searched"),
@@ -384,9 +475,14 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
                 "Run %s did not search %d requested keyword(s): %s",
                 run_id, len(missed), missed,
             )
+        # Write the outcome into the run file so history is honest after a
+        # restart — otherwise a stopped run reads as "completed" forever.
+        _finalise_run_file(run_id, state.get("status", "completed"))
+
     except Exception as exc:  # noqa: BLE001 — surfaced to the UI via status
         logger.exception("Run %s failed", run_id)
         run_states[run_id].update(status="failed", error=str(exc), completed_at=datetime.now().isoformat())
+        _finalise_run_file(run_id, "failed")
 
 
 # ── Routes ─────────────────────────────────────────────────────────────────
@@ -417,6 +513,18 @@ async def start_run(request: RunRequest, background_tasks: BackgroundTasks):
     if not request.keywords and request.run_mode == "existing":
         raise HTTPException(400, "Add at least one keyword, or switch to AI keyword generation.")
 
+    # One run at a time. Two would fight over the single browser profile
+    # directory, double the captcha exposure, and interleave their log tails.
+    busy = live_run()
+    if busy:
+        busy_id, busy_state = busy
+        raise HTTPException(
+            409,
+            f"A search is already running ({busy_id}) — "
+            f"{busy_state.get('current_keyword') or 'starting up'}. "
+            f"Stop it before starting another: /api/runs/{busy_id}/cancel",
+        )
+
     run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     run_states[run_id] = {
@@ -433,6 +541,61 @@ async def start_run(request: RunRequest, background_tasks: BackgroundTasks):
     background_tasks.add_task(run_orchestrator_background, run_id, request)
 
     return {"id": run_id, "run_id": run_id, "status": "started"}
+
+
+def _finalise_run_file(run_id: str, status: str) -> None:
+    """
+    Stamp a run's real outcome into its result file.
+
+    A run that was stopped at 40% must not read as "completed" months later just
+    because that is the only word the file knew. No file is created here: a run
+    that found nothing has nothing to record.
+    """
+    run_file = _find_run_file(run_id)
+    if run_file is None:
+        return
+    try:
+        payload = json.loads(run_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    payload["status"] = status
+    payload["completed_at"] = datetime.now().isoformat()
+    run_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: str):
+    """
+    Ask a running search to stop.
+
+    Cooperative, not forceful: the run notices on its next scroll step (~3s),
+    unwinds cleanly, and everything it has already collected is judged and
+    saved. Nothing is lost except the cards it had not scrolled to yet.
+    """
+    state = run_states.get(run_id)
+    if state is None:
+        raise HTTPException(404, "Run not found")
+
+    status = state.get("status")
+    if status in TERMINAL_STATES:
+        return {"run_id": run_id, "status": status,
+                "note": "This run had already finished."}
+
+    state["cancel_requested"] = True
+    state["status"] = "cancelling"
+    logger.info("🛑 Stop requested for run %s", run_id)
+    return {"run_id": run_id, "status": "cancelling"}
+
+
+@app.get("/api/runs/active")
+async def get_active_run():
+    """Which run owns the pipeline right now, if any. Drives the Start button."""
+    busy = live_run()
+    if not busy:
+        return {"active": None}
+    run_id, state = busy
+    return {"active": {"run_id": run_id, "status": state.get("status"),
+                       "current_keyword": state.get("current_keyword")}}
 
 
 @app.get("/api/runs")
@@ -452,7 +615,9 @@ async def list_runs(limit: int = 50):
                 {
                     "id": run_file.stem,
                     "category": cat_dir.name,
-                    "status": "completed",
+                    # A run stopped part-way says so, rather than reading as a
+                    # finished one after a restart.
+                    "status": data.get("status") or "completed",
                     "started_at": data.get("recorded_at", ""),
                     "counts": {
                         "accepted": len(data.get("accepted", []) or []),
@@ -493,7 +658,7 @@ async def get_run(run_id: str):
     return {
         "id": run_id,
         "category": run_file.parent.name,
-        "status": "completed",
+        "status": data.get("status") or "completed",
         "progress": 100,
         "data": data,
         "counts": {

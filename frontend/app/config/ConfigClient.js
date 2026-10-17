@@ -28,6 +28,7 @@ export default function ConfigClient() {
   const [lastSelection, setLastSelection] = useState(null);
   const [loading, setLoading] = useState(true);
   const [startError, setStartError] = useState('');
+  const [activeRun, setActiveRun] = useState(null);
   // Lets the toggle handler persist without re-creating the callback.
   const selectionRef = useRef(null);
 
@@ -40,6 +41,14 @@ export default function ConfigClient() {
         if (!res.ok) throw new Error(`Config request failed with ${res.status}`);
         const data = await res.json();
         if (!active) return;
+        // One run at a time. Stated here rather than letting the POST fail with
+        // a 409 the user would have to decode.
+        fetch('/api/runs/active', { cache: 'no-store' })
+          .then((r) => (r.ok ? r.json() : null))
+          .then((body) => {
+            if (active) setActiveRun(body?.active ?? null);
+          })
+          .catch(() => {});
         const saved = data.last_selection ?? data.lastSelection ?? null;
         const restored = saved && Object.keys(saved).length ? saved : null;
         selectionRef.current = restored;
@@ -163,6 +172,19 @@ export default function ConfigClient() {
             </Link>
           </div>
         </header>
+
+        {activeRun && (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm">
+            <span className="text-foreground">
+              A search is already running
+              {activeRun.current_keyword ? ` — currently on “${activeRun.current_keyword}”` : ''}.
+              Only one search can run at a time.
+            </span>
+            <Link href={`/runs/${activeRun.run_id}`}>
+              <Button variant="outline" size="sm">Go to it</Button>
+            </Link>
+          </div>
+        )}
 
         {startError && (
           <div className="rounded-xl border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive" role="alert">

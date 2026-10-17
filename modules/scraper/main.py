@@ -166,6 +166,8 @@ async def run_scrape(
     request_id: str | None = None,
     parallel_workers: int = 1,
     on_harvested=None,
+    should_stop=None,
+    on_step=None,
 ) -> list[AdRecord]:
     """
     Full scrape pass: for each keyword, search the library, extract ads,
@@ -187,6 +189,7 @@ async def run_scrape(
     parallel_workers: how many keywords to crawl at once. 1 is the original
     single-page sequential behaviour; above 1 each worker gets its own page and
     a slice of the keywords.
+    should_stop / on_step: polled per scroll step, see _scrape_keyword.
     """
     # The lens for this run — scopes verdict keys, heuristics and storage.
     cat_id = filters.category
@@ -210,11 +213,11 @@ async def run_scrape(
     if context is not None:
         return await _scrape_on(context, filters, category, cat_id, run_seen,
                                  filter_index, profile_id, request_id,
-                                 parallel_workers, on_harvested)
+                                 parallel_workers, on_harvested, should_stop, on_step)
     async with browser_session(headless=headless) as owned:
         return await _scrape_on(owned, filters, category, cat_id, run_seen,
                                 filter_index, profile_id, request_id,
-                                parallel_workers, on_harvested)
+                                parallel_workers, on_harvested, should_stop, on_step)
 
 
 async def _scrape_keyword(
@@ -232,9 +235,20 @@ async def _scrape_keyword(
     extract_lock: asyncio.Lock,
     is_first_keyword: bool,
     worker_label: str = "",
+    should_stop=None,
+    on_step=None,
 ) -> list[AdRecord]:
     """
     Crawl ONE keyword on ONE page and return the ads worth judging.
+
+    `should_stop` is polled every scroll step. It causes a BREAK, never a raise:
+    this function has one exit from the scroll loop, so breaking falls straight
+    through to the filter below and the caller judges and stores whatever was
+    collected. That is the whole reason cancellation loses no work — a keyword
+    cut short behaves exactly like one that reached the bottom. Raising instead
+    would be caught and swallowed by the parallel worker below, which would then
+    carry on to the next keyword.
+    `on_step` reports cards-seen-so-far per scroll, for liveness.
 
     Split out of the loop so the same body serves both the sequential path and
     each parallel worker. The only shared mutable state is `seen_ids`, and the
@@ -300,6 +314,19 @@ async def _scrape_keyword(
 
     while True:
         steps += 1
+
+        if should_stop is not None and should_stop():
+            # Break, not raise — see the docstring. Everything harvested from
+            # this keyword so far is below in `keyword_ads` and is judged and
+            # saved like any other keyword; only the cards we never scrolled to
+            # are gone, which was true whether or not anyone pressed stop.
+            logger.warning(
+                "%s🛑 Cancelled mid-keyword %r — %d card(s) collected so far. "
+                "They will be judged and saved; the rest of this list was not searched.",
+                tag, keyword, len(keyword_ads),
+            )
+            break
+
         # Serialised: extraction filters against the shared seen_ids, and it
         # must be read-then-written atomically or two workers harvest one card.
         async with extract_lock:
@@ -367,6 +394,23 @@ async def _scrape_keyword(
         if timing.get("count") is not None:
             dom_cards = timing["count"]
         waited.append(timing["waited_ms"])
+
+        # Liveness. Judging happens once per KEYWORD, so a keyword promising
+        # ~880 results is silent for its whole ten minutes — without this tick
+        # there is no way to tell a working crawl from a wedged tab, and no way
+        # to tell whether a run has stalled.
+        if on_step is not None:
+            try:
+                await on_step(
+                    keyword=keyword,
+                    cards_seen=len(keyword_cards),
+                    ads_collected=len(keyword_ads),
+                    target=target_unique,
+                    estimate=estimate,
+                    steps=steps,
+                )
+            except Exception as exc:  # noqa: BLE001 - reporting must never break a crawl
+                logger.debug("⚠️ step reporting failed (%s)", exc)
 
         if not timing.get("moved", True):
             stuck_scrolls += 1
@@ -505,6 +549,8 @@ async def _scrape_on(
     request_id: str | None = None,
     parallel_workers: int = 1,
     on_harvested=None,
+    should_stop=None,
+    on_step=None,
 ) -> list[AdRecord]:
     """
     Crawl every keyword on an existing context.
@@ -536,10 +582,15 @@ async def _scrape_on(
         try:
             fresh: list[AdRecord] = []
             for idx, keyword in enumerate(keywords):
+                if should_stop is not None and should_stop():
+                    logger.info("🔫 Stopping before %r — %d keyword(s) left unsearched",
+                                keyword, len(keywords) - idx)
+                    break
                 batch = await _scrape_keyword(
                     page, keyword, filters, category, cat_id, run_seen, filter_index,
                     profile_id, request_id, seen_ids, seen_prints,
                     extract_lock, is_first_keyword=(idx == 0),
+                    should_stop=should_stop, on_step=on_step,
                 )
                 fresh.extend(batch)
                 # Report each keyword the moment it lands. A run that scrapes
@@ -565,6 +616,11 @@ async def _scrape_on(
             out: list[AdRecord] = []
             label = f"w{idx + 1}"
             for j, keyword in enumerate(chunk):
+                # Checked here too: a worker that only noticed cancellation
+                # inside a keyword would still start the NEXT one.
+                if should_stop is not None and should_stop():
+                    logger.info("🔫 %s stopping before %r", label, keyword)
+                    break
                 try:
                     batch = await _scrape_keyword(
                         pages[idx], keyword, filters, category, cat_id, run_seen,
@@ -572,6 +628,7 @@ async def _scrape_on(
                         seen_prints, extract_lock,
                         is_first_keyword=(idx == 0 and j == 0),
                         worker_label=label,
+                        should_stop=should_stop, on_step=on_step,
                     )
                     out.extend(batch)
                     if on_harvested and batch:

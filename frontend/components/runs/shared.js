@@ -3,7 +3,9 @@ export const STATUS_STYLES = {
   running: 'bg-info/15 text-info border-info/40',
   completed: 'bg-success/15 text-success border-success/40',
   failed: 'bg-destructive/15 text-destructive border-destructive/40',
+  cancelling: 'bg-warning/15 text-warning border-warning/40',
   cancelled: 'bg-muted text-muted-foreground border-border',
+  abandoned: 'bg-muted text-muted-foreground border-border',
   pending: 'bg-muted text-muted-foreground border-border',
 };
 
@@ -12,7 +14,9 @@ export const STATUS_LABELS = {
   running: 'Searching…',
   completed: 'Finished',
   failed: 'Failed',
+  cancelling: 'Stopping…',
   cancelled: 'Stopped',
+  abandoned: 'Lost',
   pending: 'Waiting',
 };
 
