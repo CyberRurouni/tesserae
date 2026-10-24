@@ -4,22 +4,15 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/Button';
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/Card';
 import FilterBuilder from '@/components/config/FilterBuilder';
-import { Nav } from '@/components/Nav';
+import { PageShell } from '@/components/Nav';
 
 function Skeleton() {
   return (
-    <main className="min-h-screen bg-background p-6 md:p-8">
-      <div className="mx-auto max-w-7xl animate-pulse space-y-8">
-        <div className="h-9 w-56 rounded-lg bg-muted" />
-        <div className="grid gap-6 lg:grid-cols-2">
-          {[0, 1].map((i) => (
-            <div key={i} className="h-[32rem] rounded-2xl border border-border/60 bg-card/60" />
-          ))}
-        </div>
-      </div>
-    </main>
+    <div className="mx-auto w-full max-w-6xl animate-pulse space-y-6 px-6 py-8 md:px-10">
+      <div className="h-8 w-40 rounded-md bg-card" />
+      <div className="h-[32rem] rounded-lg border border-border bg-card" />
+    </div>
   );
 }
 
@@ -147,79 +140,34 @@ export default function ConfigClient() {
   if (loading) return <Skeleton />;
 
   return (
-    <main className="min-h-screen bg-background">
-      <Nav />
-      <div className="mx-auto max-w-7xl space-y-8 p-6 md:p-8">
-        <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-          <div className="space-y-2">
-            <p className="eyebrow">Step 3 of 3</p>
-            <h1 className="text-3xl font-bold tracking-tight md:text-4xl">
-              Run your <span className="text-gradient">search</span>
-            </h1>
-            <p className="max-w-2xl text-muted-foreground">
-              Pick the keywords and press start. Your profile lives on its own pages.
-            </p>
-          </div>
-          <div className="flex gap-3">
-            <Link href="/">
-              <Button variant="outline">Dashboard</Button>
-            </Link>
-            <Link href="/about">
-              <Button variant="outline">About you</Button>
-            </Link>
-            <Link href="/runs">
-              <Button variant="outline">All runs</Button>
-            </Link>
-          </div>
-        </header>
+    <PageShell
+      title="Search"
+      description="Choose your keywords and start. Your profile and what you are looking for are set on their own pages."
+    >
+      {activeRun && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-warning/30 bg-warning/10 px-4 py-3 text-sm">
+          <span className="text-foreground">
+            A search is already running
+            {activeRun.current_keyword ? `, currently on “${activeRun.current_keyword}”` : ''}. Only one search can run at a time.
+          </span>
+          <Link href={`/runs/${activeRun.run_id}`}>
+            <Button variant="outline" size="sm">Go to it</Button>
+          </Link>
+        </div>
+      )}
 
-        {activeRun && (
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm">
-            <span className="text-foreground">
-              A search is already running
-              {activeRun.current_keyword ? ` — currently on “${activeRun.current_keyword}”` : ''}.
-              Only one search can run at a time.
-            </span>
-            <Link href={`/runs/${activeRun.run_id}`}>
-              <Button variant="outline" size="sm">Go to it</Button>
-            </Link>
-          </div>
-        )}
+      {startError && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive" role="alert">
+          {startError}
+        </div>
+      )}
 
-        {startError && (
-          <div className="rounded-xl border border-destructive/50 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive" role="alert">
-            {startError}
-          </div>
-        )}
-
-        <FilterBuilder
-          onStart={handleStart}
-          onRunModeChange={handleRunModeChange}
-          initialData={lastSelection}
-        />
-
-        <Card className="border-border/50">
-          <CardHeader>
-            <CardTitle className="text-lg">What happens next</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-4 sm:grid-cols-3">
-            {[
-              { step: '1', title: 'Ads are collected', body: 'Tesserae reads the Meta Ad Library for every keyword across your chosen platforms.' },
-              { step: '2', title: 'AI judges each ad', body: 'Each ad is scored against your profile so only genuinely relevant ones survive.' },
-              { step: '3', title: 'You review the results', body: 'Accepted leads are kept per profile. Ads that fit you but are off-request right now are held for later instead of being thrown away.' },
-            ].map((item) => (
-              <div key={item.step} className="space-y-1.5">
-                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/15 text-xs font-bold text-primary">
-                  {item.step}
-                </span>
-                <p className="text-sm font-semibold text-foreground">{item.title}</p>
-                <p className="text-xs leading-relaxed text-muted-foreground">{item.body}</p>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      </div>
-    </main>
+      <FilterBuilder
+        onStart={handleStart}
+        onRunModeChange={handleRunModeChange}
+        initialData={lastSelection}
+      />
+    </PageShell>
   );
 }
 

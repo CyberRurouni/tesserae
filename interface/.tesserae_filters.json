@@ -10,7 +10,6 @@
     "threads"
   ],
   "media_type": "all",
-  "date_preset": "last_30_days",
   "keywords": [],
   "ad_age_hours": "720",
   "delivered_to_regions": [
@@ -21,45 +20,24 @@
   "heuristic_patterns": {
     "require_ad_text_patterns": [],
     "require_any_ad_text_patterns": [],
-    "exclude_ad_text_patterns": []
+    "exclude_ad_text_patterns": [
+      "course",
+      "enroll"
+    ]
   },
-  "run_mode": "existing",
+  "custom_start_date": "",
+  "custom_end_date": "",
   "regions": "ALL",
+  "run_mode": "generate",
   "cycles": 1,
   "run_until_complete": false,
+  "parallel_workers": 3,
+  "harvest_limit": 20,
+  "harvest_keywords": null,
+  "profile_id": "fam_ai-systems-architect_301c03",
+  "request_id": "req_ai-systems-architect_301c03_20bdae",
   "ad_age": 720,
   "last_keywords": [
-    "chatbot development remote job",
-    "AI chatbot engineer contract",
-    "LLM application developer",
-    "generative AI developer remote",
-    "AI product engineer remote",
-    "RAG developer remote",
-    "OpenAI API developer",
-    "Node.js backend developer remote",
-    "Flask developer remote",
-    "Supabase developer remote",
-    "SQL backend developer remote",
-    "API integration developer remote",
-    "microservices developer Python",
-    "JavaScript Python developer remote",
-    "frontend backend developer remote",
-    "React developer intermediate remote",
-    "software developer full stack contract",
-    "lead generation automation developer",
-    "growth automation engineer",
-    "social media automation developer",
-    "content automation engineer remote",
-    "data extraction developer remote",
-    "AI content pipeline developer",
-    "freelance AI developer remote",
-    "contract backend developer Python",
-    "part time AI systems developer",
-    "AI systems consultant remote",
-    "freelance automation engineer",
-    "hiring Python developer remote",
-    "looking for AI engineer remote",
-    "seeking backend developer remote",
-    "remote developer international team"
+    "rust developer"
   ]
 }

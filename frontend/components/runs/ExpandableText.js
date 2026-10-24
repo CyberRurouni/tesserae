@@ -33,11 +33,17 @@ export default function ExpandableText({
   return (
     <div className="space-y-1.5">
       <p
-        className={cn(
-          'whitespace-pre-wrap text-sm text-muted-foreground',
-          !open && 'line-clamp-3',
-          className
-        )}
+        className={cn('whitespace-pre-wrap text-sm text-muted-foreground', className)}
+        style={
+          open
+            ? undefined
+            : {
+                display: '-webkit-box',
+                WebkitBoxOrient: 'vertical',
+                WebkitLineClamp: collapsedLines,
+                overflow: 'hidden',
+              }
+        }
       >
         {body}
       </p>
@@ -46,9 +52,9 @@ export default function ExpandableText({
           type="button"
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
-          className="text-xs font-medium text-primary underline-offset-4 hover:underline"
+          className="text-xs font-medium text-foreground/80 underline underline-offset-4 hover:text-foreground"
         >
-          {open ? 'Show less' : `Read the rest of this ${label} (${body.length} characters)`}
+          {open ? 'Show less' : 'Show more'}
         </button>
       )}
     </div>

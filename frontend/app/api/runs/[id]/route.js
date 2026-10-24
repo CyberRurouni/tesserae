@@ -25,9 +25,11 @@ function readRunFile(found) {
       judgedRejected: Array.isArray(parsed.judged_rejected) ? parsed.judged_rejected : [],
       // Absent in run files written before the not-now bucket existed.
       deferred: Array.isArray(parsed.deferred) ? parsed.deferred : [],
+      held: Array.isArray(parsed.held) ? parsed.held : [],
       aiFailed: Array.isArray(parsed.ai_failed) ? parsed.ai_failed : [],
       fileKeywords: Array.isArray(parsed.keywords) ? parsed.keywords : [],
       recordedAt: parsed.recorded_at || null,
+      thresholds: parsed.thresholds || null,
     };
   } catch (error) {
     console.error(`Error reading run file for ${found.filePath}:`, error);
@@ -36,33 +38,11 @@ function readRunFile(found) {
       judgedRejected: [],
       aiFailed: [],
       deferred: [],
+      held: [],
       fileKeywords: [],
       recordedAt: null,
+      thresholds: null,
     };
-  }
-}
-
-/**
- * Cooperative stop. The run notices on its next scroll step (~3s), unwinds
- * cleanly, and everything it had already collected is judged and saved first —
- * so this is safe to press at any moment.
- */
-export async function POST(request, { params }) {
-  const { id } = await params;
-  try {
-    const res = await fetch(`${PYTHON_BACKEND}/api/runs/${id}/cancel`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      cache: 'no-store',
-    });
-    const text = await res.text();
-    return new NextResponse(text, {
-      status: res.status,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  } catch (error) {
-    console.error('Cancel failed:', error);
-    return NextResponse.json({ error: 'Cannot reach the Tesserae backend. Is it running?' }, { status: 503 });
   }
 }
 
@@ -91,7 +71,7 @@ export async function GET(request, { params }) {
 
     const saved = found
       ? readRunFile(found)
-      : { accepted: [], judgedRejected: [], aiFailed: [], deferred: [], fileKeywords: [], recordedAt: null };
+      : { accepted: [], judgedRejected: [], aiFailed: [], deferred: [], held: [], fileKeywords: [], recordedAt: null, thresholds: null };
 
     // While a run is going its results live in memory, not in a file: the file
     // is written once when the run ends. Without this the tiles and the
@@ -99,15 +79,17 @@ export async function GET(request, { params }) {
     // at once — which is precisely what happened before results were streamed up
     // here.
     const liveResults = live?.live_results || null;
-    const { accepted, judgedRejected, aiFailed, deferred } =
+    const { accepted, judgedRejected, aiFailed, deferred, held } =
       liveResults && !found
         ? {
             accepted: liveResults.accepted || [],
             judgedRejected: liveResults.judged_rejected || [],
             aiFailed: liveResults.ai_failed || [],
             deferred: liveResults.deferred || [],
+            held: liveResults.held || [],
           }
         : saved;
+    const thresholds = saved.thresholds || live?.thresholds || null;
 
     // A saved result file means the run is over, whatever the backend says.
     const status = live?.status || (found ? 'completed' : 'pending');
@@ -186,8 +168,11 @@ export async function GET(request, { params }) {
       judged_rejected: judgedRejected,
       ai_failed: aiFailed,
       deferred,
+      held,
+      thresholds,
       counts: {
         accepted: accepted.length,
+        held: held.length,
         deferred: deferred.length,
         rejected: judgedRejected.length,
         ai_failed: aiFailed.length,

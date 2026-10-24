@@ -27,7 +27,7 @@ make a judgement call about an edit. Everything else is bookkeeping.
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # How an edit changes the acceptable set of ads:
 #   none      — same ads acceptable, only worded better. Stays in the node.
@@ -86,5 +86,11 @@ class ProfileRequest(BaseModel):
     profile_id: str
     request_text: str
     founding_text: str
+    # How certain the judge must be before an accepted ad becomes a lead.
+    # Stored with the request (the lens), snapshotted into each run file, and
+    # deliberately not applied to rejections or deferrals. Slider range is
+    # 0.5–0.9 in 0.05 steps; 0.5 means "accept everything not extremely low".
+    profile_threshold: float = Field(default=0.5, ge=0.5, le=0.9)
+    request_threshold: float = Field(default=0.5, ge=0.5, le=0.9)
     created_at: str = ""
     updated_at: str = ""

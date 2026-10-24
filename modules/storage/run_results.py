@@ -52,7 +52,7 @@ RUN_RESULTS_TTL_SECONDS = 7 * 24 * 60 * 60
 
 # Buckets, in the order they appear in the finished file. `_meta` is a header
 # written once; `keyword` entries accumulate as keywords are searched.
-_BUCKETS = ("accepted", "deferred", "judged_rejected", "ai_failed")
+_BUCKETS = ("accepted", "held", "deferred", "judged_rejected", "ai_failed")
 
 
 def _key(run_id: str) -> str:
@@ -63,7 +63,11 @@ def _touch(run_id: str) -> None:
     safe_redis_operation(run_state_broker.expire, _key(run_id), RUN_RESULTS_TTL_SECONDS)
 
 
-def begin_run(run_id: str, category: str) -> None:
+def begin_run(
+    run_id: str,
+    category: str,
+    thresholds: dict[str, float] | None = None,
+) -> None:
     """Open a run's list with its header. Cheap, and safe to call twice."""
     if not run_id:
         return
@@ -71,6 +75,7 @@ def begin_run(run_id: str, category: str) -> None:
         "_meta": {
             "category": category,
             "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "thresholds": thresholds or {"profile": 0.5, "request": 0.5},
         }
     })
     ok = safe_redis_operation(run_state_broker.rpush, _key(run_id), header)
@@ -133,8 +138,8 @@ def read_run(run_id: str) -> dict | None:
 
 def _assemble(raw) -> dict:
     """Turn the flat list back into the finished file's shape."""
-    payload: dict = {"accepted": [], "deferred": [], "judged_rejected": [],
-                     "ai_failed": [], "keywords": []}
+    payload: dict = {"accepted": [], "held": [], "deferred": [],
+                     "judged_rejected": [], "ai_failed": [], "keywords": []}
     seen_keywords: set[str] = set()
     for item in raw:
         try:
@@ -146,6 +151,7 @@ def _assemble(raw) -> dict:
         if meta:
             payload["category"] = meta.get("category") or payload.get("category")
             payload["recorded_at"] = meta.get("recorded_at") or payload.get("recorded_at")
+            payload["thresholds"] = meta.get("thresholds") or payload.get("thresholds")
             continue
         kw = obj.get("keyword")
         if kw and kw not in seen_keywords:
@@ -214,6 +220,7 @@ def write_run_file(run_id: str, category: str | None = None,
                        if not isinstance(e, dict) or e.get("ad_archive_id") not in known]
             payload[bucket] = merged
         payload["recorded_at"] = previous.get("recorded_at") or payload.get("recorded_at")
+        payload["thresholds"] = payload.get("thresholds") or previous.get("thresholds")
         if not status and previous.get("status"):
             payload["status"] = previous["status"]
         kw = list(previous.get("keywords") or [])
@@ -227,9 +234,11 @@ def write_run_file(run_id: str, category: str | None = None,
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     discard(run_id)
     logger.info(
-        "🗄️ Run %s written: %d accepted, %d deferred, %d rejected, %d AI-failed",
-        run_id, len(payload["accepted"]), len(payload["deferred"]),
-        len(payload["judged_rejected"]), len(payload["ai_failed"]),
+        "🗄️ Run %s written: %d accepted, %d held, %d deferred, %d rejected, "
+        "%d AI-failed",
+        run_id, len(payload["accepted"]), len(payload["held"]),
+        len(payload["deferred"]), len(payload["judged_rejected"]),
+        len(payload["ai_failed"]),
     )
     return str(path)
 

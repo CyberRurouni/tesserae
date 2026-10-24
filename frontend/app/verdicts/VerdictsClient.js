@@ -147,7 +147,6 @@ export default function VerdictsClient() {
 
   return (
     <PageShell
-      eyebrow="Decisions"
       title="What Tesserae has decided"
       description="Every ad Tesserae has judged, and the verdict it reached. Correct anything wrong here — the next run will respect the change."
       actions={
@@ -158,7 +157,7 @@ export default function VerdictsClient() {
     >
       {/* Scope notice: global vs profile-scoped is the single most confusing
           thing about these sets, so it is stated rather than implied. */}
-      <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+      <div className="rounded-md border border-border bg-card px-4 py-3 text-sm text-muted-foreground">
         <span className="font-medium text-foreground">Accepted and junk are global.</span>{' '}
         Editing either applies to every profile. Only <span className="font-medium text-foreground">rejected</span> is
         scoped to one profile.
@@ -173,7 +172,7 @@ export default function VerdictsClient() {
               className={cn(
                 'rounded-lg border px-4 py-2 text-sm font-medium transition-colors',
                 tab === t.key
-                  ? 'border-primary bg-primary/15 text-primary'
+                  ? 'border-foreground/30 bg-secondary text-foreground'
                   : 'border-border text-muted-foreground hover:bg-accent/40 hover:text-foreground'
               )}
             >
@@ -190,7 +189,7 @@ export default function VerdictsClient() {
               id="scope"
               value={profileId || ''}
               onChange={(e) => { setProfileId(e.target.value); setOffset(0); }}
-              className="h-10 rounded-lg border border-border bg-background px-3 text-sm"
+              className="h-9 rounded-md border border-input bg-background px-3 text-sm"
             >
               {profiles.map((p) => (
                 <option key={p.profile_id} value={p.profile_id}>{p.about}</option>
@@ -263,7 +262,7 @@ export default function VerdictsClient() {
             </div>
           </div>
 
-          {flash && <p className="text-sm text-green-600 dark:text-green-400">{flash}</p>}
+          {flash && <p className="text-sm text-success">{flash}</p>}
           {error && <p className="text-sm text-destructive">{error}</p>}
 
           {loading ? (

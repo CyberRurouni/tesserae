@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
+import { PageShell } from '@/components/Nav';
 import { RunTable } from '@/components/runs/RunTable';
 import { Button } from '@/components/ui/Button';
 
@@ -30,25 +31,20 @@ export default function RunsPage() {
   }, [fetchRuns]);
 
   return (
-    <main className="min-h-screen bg-background p-6 md:p-8">
-      <div className="mx-auto max-w-7xl space-y-6">
-        <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-          <div className="space-y-2">
-            <p className="eyebrow">History</p>
-            <h1 className="text-3xl font-bold tracking-tight md:text-4xl">All runs</h1>
-            <p className="text-muted-foreground">Every search Tesserae has run, newest first.</p>
-          </div>
-          <Link href="/config">
-            <Button>New search</Button>
-          </Link>
-        </header>
-
-        {loading ? (
-          <div className="h-72 animate-pulse rounded-2xl border border-border/60 bg-card/60" />
-        ) : (
-          <RunTable runs={runs} />
-        )}
-      </div>
-    </main>
+    <PageShell
+      title="Runs"
+      description="Every search Tesserae has run, newest first."
+      actions={
+        <Link href="/config">
+          <Button>New search</Button>
+        </Link>
+      }
+    >
+      {loading ? (
+        <div className="h-72 animate-pulse rounded-lg border border-border bg-card" />
+      ) : (
+        <RunTable runs={runs} />
+      )}
+    </PageShell>
   );
 }

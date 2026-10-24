@@ -1,5 +1,6 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
@@ -13,50 +14,94 @@ const LINKS = [
   { href: '/verdicts', label: 'Decisions' },
 ];
 
+function useActiveRun() {
+  const [active, setActive] = useState(null);
+  useEffect(() => {
+    let on = true;
+    const pull = async () => {
+      try {
+        const res = await fetch('/api/runs/active', { cache: 'no-store' });
+        const body = res.ok ? await res.json() : null;
+        if (on) setActive(body?.active ?? null);
+      } catch {
+        if (on) setActive(null);
+      }
+    };
+    pull();
+    const timer = setInterval(pull, 5000);
+    return () => {
+      on = false;
+      clearInterval(timer);
+    };
+  }, []);
+  return active;
+}
+
 export function Nav() {
   const pathname = usePathname();
+  const active = useActiveRun();
+  const isActive = (href) => (href === '/' ? pathname === '/' : pathname === href || pathname.startsWith(`${href}/`));
+
   return (
-    <nav className="border-b border-border/60 bg-background/80 backdrop-blur">
-      <div className="mx-auto flex max-w-7xl flex-wrap items-center gap-1 px-6 py-3 md:px-8">
-        <Link href="/" className="mr-4 text-sm font-bold tracking-tight">
-          Tesserae
-        </Link>
-        {LINKS.map((link) => (
-          <Link
-            key={link.href}
-            href={link.href}
-            className={cn(
-              'rounded-lg px-3 py-1.5 text-sm font-medium transition-colors',
-              pathname === link.href
-                ? 'bg-primary/15 text-primary'
-                : 'text-muted-foreground hover:bg-accent/40 hover:text-foreground'
-            )}
-          >
-            {link.label}
+    <header className="sticky top-0 z-40 border-b border-border/70 bg-background/90 backdrop-blur-md">
+      <div className="mx-auto w-full max-w-6xl px-6 md:px-10">
+        <div className="flex items-center justify-between gap-4 py-4">
+          <Link href="/" className="group flex min-w-0 items-baseline gap-3">
+            <span className="font-serif text-3xl tracking-tight transition-colors group-hover:text-primary">
+              Tesserae
+            </span>
+            <span className="hidden text-xs text-muted-foreground sm:block">
+              Find the ads that fit you.
+            </span>
           </Link>
-        ))}
+          {active && (
+            <Link
+              href={`/runs/${active.run_id}`}
+              className="flex max-w-[16rem] shrink-0 items-center gap-2 rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-foreground/25 hover:text-foreground"
+            >
+              <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-primary" aria-hidden="true" />
+              <span className="truncate">
+                Search running{active.current_keyword ? `: ${active.current_keyword}` : ''}
+              </span>
+            </Link>
+          )}
+        </div>
+
+        <nav className="-mb-px flex overflow-x-auto" aria-label="Main">
+          {LINKS.map((link) => (
+            <Link
+              key={link.href}
+              href={link.href}
+              aria-current={isActive(link.href) ? 'page' : undefined}
+              className={cn(
+                'relative whitespace-nowrap px-4 py-3 text-sm transition-colors first:pl-0',
+                isActive(link.href)
+                  ? 'text-primary after:absolute after:inset-x-4 after:-bottom-px after:h-0.5 after:rounded-full after:bg-primary first:after:left-0'
+                  : 'text-muted-foreground hover:text-foreground'
+              )}
+            >
+              {link.label}
+            </Link>
+          ))}
+        </nav>
       </div>
-    </nav>
+    </header>
   );
 }
 
-export function PageShell({ title, eyebrow, description, children, actions }) {
+export function PageShell({ title, description, children, actions }) {
   return (
-    <main className="min-h-screen bg-background">
-      <Nav />
-      <div className="mx-auto max-w-7xl space-y-8 p-6 md:p-8">
-        <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-          <div className="space-y-2">
-            {eyebrow && <p className="eyebrow">{eyebrow}</p>}
-            <h1 className="text-3xl font-bold tracking-tight md:text-4xl">{title}</h1>
-            {description && (
-              <p className="max-w-2xl text-sm text-muted-foreground">{description}</p>
-            )}
-          </div>
-          {actions && <div className="flex gap-3">{actions}</div>}
-        </header>
-        {children}
-      </div>
-    </main>
+    <div className="mx-auto w-full max-w-6xl space-y-8 px-6 py-8 md:px-10">
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="space-y-2">
+          <h1 className="font-serif text-3xl italic tracking-tight">{title}</h1>
+          {description && (
+            <p className="max-w-3xl text-sm leading-relaxed text-muted-foreground">{description}</p>
+          )}
+        </div>
+        {actions && <div className="flex shrink-0 gap-2">{actions}</div>}
+      </header>
+      {children}
+    </div>
   );
 }

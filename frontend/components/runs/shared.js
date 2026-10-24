@@ -1,16 +1,17 @@
+// Status is shown as a small dot plus a word, coloured by tone only.
+// Partial is a success with a caveat, not a failure: the run stopped early but
+// everything it found was judged and saved. Warning-toned so it is not missed,
+// but it must not read as "Failed" — that is what trained us to ignore these.
 export const STATUS_STYLES = {
-  starting: 'bg-info/15 text-info border-info/40',
-  running: 'bg-info/15 text-info border-info/40',
-  completed: 'bg-success/15 text-success border-success/40',
-  failed: 'bg-destructive/15 text-destructive border-destructive/40',
-  cancelling: 'bg-warning/15 text-warning border-warning/40',
-  cancelled: 'bg-muted text-muted-foreground border-border',
-  abandoned: 'bg-muted text-muted-foreground border-border',
-  // Partial is a success with a caveat, not a failure: the run stopped early but
-  // everything it found was judged and saved. Warning-toned so it is not missed,
-  // but it must not read as "Failed" — that is what trained us to ignore these.
-  partial: 'bg-warning/15 text-warning border-warning/40',
-  pending: 'bg-muted text-muted-foreground border-border',
+  starting: 'text-info',
+  running: 'text-info',
+  completed: 'text-success',
+  failed: 'text-destructive',
+  cancelling: 'text-warning',
+  cancelled: 'text-muted-foreground',
+  abandoned: 'text-muted-foreground',
+  partial: 'text-warning',
+  pending: 'text-muted-foreground',
 };
 
 export const STATUS_LABELS = {
@@ -56,7 +57,7 @@ export const countEmptyKeywords = (keywords) =>
   keywordList(keywords).filter((entry) => keywordAcceptedCount(entry) === 0).length;
 
 export const modeLabel = (mode, runUntilComplete) => {
-  if (runUntilComplete) return 'AI · until done';
+  if (runUntilComplete) return 'AI keywords, until done';
   if (mode === 'generate') return 'AI keywords';
   if (mode === 'existing') return 'My keywords';
   return '—';

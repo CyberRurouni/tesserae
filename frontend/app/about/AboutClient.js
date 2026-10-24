@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/Card';
 import { PageShell } from '@/components/Nav';
+import { Spinner } from '@/components/ui/Spinner';
 import { cn } from '@/lib/utils';
 
 const CLASSIFY_DEBOUNCE_MS = 1200;
@@ -25,7 +26,7 @@ function ChangeBanner({ verdict, busy }) {
 
   if (!verdict.new_profile_required) {
     return (
-      <div className="rounded-xl border border-success/40 bg-success/10 px-4 py-3 text-sm">
+      <div className="rounded-md border border-success/40 bg-success/10 px-4 py-3 text-sm">
         <p className="font-semibold text-foreground">Stays inside this profile</p>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
           {verdict.explanation || 'Same objective, just clearer wording.'} Saving edits this
@@ -41,7 +42,7 @@ function ChangeBanner({ verdict, busy }) {
       : 'border-warning/40 bg-warning/10';
 
   return (
-    <div className={cn('rounded-xl border px-4 py-3 text-sm', tone)}>
+    <div className={cn('rounded-md border px-4 py-3 text-sm', tone)}>
       <p className="font-semibold text-foreground">
         {verdict.change === 'widening' ? 'This widens your profile' : 'This narrows your profile'}
       </p>
@@ -76,7 +77,6 @@ export default function AboutClient() {
   const [classifying, setClassifying] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(null);
-  const [leads, setLeads] = useState([]);
   const timer = useRef(null);
 
   const load = useCallback(async () => {
@@ -102,10 +102,6 @@ export default function AboutClient() {
     setDraft(selected.profile_text);
     setDirty(false);
     setVerdict(null);
-    fetch(`/api/profiles/${selected.profile_id}/leads`, { cache: 'no-store' })
-      .then((r) => r.json())
-      .then((b) => setLeads(b.leads ?? []))
-      .catch(() => setLeads([]));
   }, [selectedId, selected?.profile_id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Debounced classification of whatever is currently typed.
@@ -139,7 +135,7 @@ export default function AboutClient() {
     setMessage(null);
   };
 
-const save = async (accept = true) => {
+  const save = async (accept = true) => {
     setBusy(true);
     setMessage(null);
     const wasNewProfile = !selectedId;
@@ -189,7 +185,6 @@ const save = async (accept = true) => {
     setDraft('');
     setDirty(false);
     setVerdict(null);
-    setLeads([]);
     setMessage({ tone: 'info', text: 'Describe one specific job objective, then save it.' });
   };
 
@@ -212,14 +207,33 @@ const save = async (accept = true) => {
     }
   };
 
+  if (!data) {
+    return (
+      <PageShell
+        title="About you"
+        description="One profile = one job objective. The sharper the objective, the better Tesserae can tell which ads are yours and which belong to someone else."
+      >
+        <div className="flex flex-col items-center justify-center gap-3 py-16">
+          {message?.tone === 'error' ? (
+            <p className="text-sm text-destructive">{message.text}</p>
+          ) : (
+            <>
+              <Spinner />
+              <p className="text-sm text-muted-foreground">Loading your profiles…</p>
+            </>
+          )}
+        </div>
+      </PageShell>
+    );
+  }
+
   return (
     <PageShell
-      eyebrow="Step 1 of 3"
       title="About you"
       description="One profile = one job objective. The sharper the objective, the better Tesserae can tell which ads are yours and which belong to someone else. Keep a separate profile per objective rather than one broad profile."
     >
       <div className="grid gap-6 lg:grid-cols-[20rem_1fr]">
-        <Card className="h-fit">
+        <Card className="h-fit lg:sticky lg:top-28">
           <CardHeader>
             <div className="flex items-center justify-between gap-2">
               <CardTitle className="text-base">Your profiles</CardTitle>
@@ -244,10 +258,10 @@ const save = async (accept = true) => {
                   type="button"
                   onClick={() => setSelectedId(profile.profile_id)}
                   className={cn(
-                    'w-full rounded-xl border p-3 text-left transition-colors',
+                    'w-full rounded-md border p-3 text-left transition-colors',
                     isSelected
-                      ? 'border-primary bg-primary/10'
-                      : 'border-border/60 hover:border-primary/40 hover:bg-accent/40'
+                      ? 'border-foreground/30 bg-secondary'
+                      : 'border-border/60 hover:border-foreground/20 hover:bg-accent/40'
                   )}
                 >
                   <div className="flex items-center justify-between gap-2">
@@ -255,14 +269,14 @@ const save = async (accept = true) => {
                       {profile.about || 'Untitled'}
                     </span>
                     {isActive && (
-                      <span className="shrink-0 rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-primary">
+                      <span className="shrink-0 rounded bg-secondary px-1.5 py-0.5 text-[11px] font-medium text-foreground">
                         Active
                       </span>
                     )}
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {profile.counts.leads} lead{profile.counts.leads === 1 ? '' : 's'} ·{' '}
-                    {profile.counts.deferred_stored} held ·{' '}
+                    {profile.counts.leads} lead{profile.counts.leads === 1 ? '' : 's'},{' '}
+                    {profile.counts.deferred_stored} held,{' '}
                     {profile.counts.rejected ?? 0} rejected here
                   </p>
                 </button>
@@ -284,7 +298,7 @@ const save = async (accept = true) => {
                 onChange={(e) => onEdit(e.target.value)}
                 rows={16}
                 placeholder="I'm a backend developer specialising in Python and FastAPI..."
-                className="w-full rounded-xl border border-input bg-background/60 p-4 text-sm leading-relaxed text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus:border-primary focus:ring-2 focus:ring-primary/30"
+                className="w-full rounded-md border border-input bg-background p-4 text-sm leading-relaxed text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus:border-ring focus:ring-1 focus:ring-ring"
               />
 
               <ChangeBanner verdict={verdict} busy={classifying} />
@@ -292,7 +306,7 @@ const save = async (accept = true) => {
               {message && (
                 <div
                   className={cn(
-                    'rounded-xl border px-4 py-3 text-sm',
+                    'rounded-md border px-4 py-3 text-sm',
                     message.tone === 'error'
                       ? 'border-destructive/50 bg-destructive/10 text-destructive'
                       : message.tone === 'success'
@@ -304,7 +318,7 @@ const save = async (accept = true) => {
                   {message.plan && (
                     <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
                       {message.plan.notes.map((note) => (
-                        <li key={note}>· {note}</li>
+                        <li key={note}>{note}</li>
                       ))}
                     </ul>
                   )}
@@ -330,40 +344,6 @@ const save = async (accept = true) => {
             </CardContent>
           </Card>
 
-          {selected && (
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-lg">Leads ({leads.length})</CardTitle>
-                <CardDescription>
-                  Kept for this profile only, and never removed. Switching profiles shows that
-                  profile&apos;s own leads.
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                {leads.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">
-                    No leads yet for this profile. Run a search from the Search page.
-                  </p>
-                ) : (
-                  <div className="space-y-2">
-                    {leads.map((lead) => (
-                      <div
-                        key={lead.ad_archive_id}
-                        className="rounded-xl border border-border/60 px-3 py-2"
-                      >
-                        <p className="text-sm font-medium text-foreground">
-                          {lead.advertiser_name || 'Unnamed advertiser'}
-                        </p>
-                        <p className="mt-0.5 truncate text-xs text-muted-foreground">
-                          {lead.source_keyword || '—'}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          )}
         </div>
       </div>
     </PageShell>

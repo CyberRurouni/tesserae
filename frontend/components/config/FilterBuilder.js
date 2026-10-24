@@ -9,7 +9,6 @@ import { Input } from '@/components/ui/Input';
 import { cn } from '@/lib/utils';
 import { clearDraft, readDraft, writeDraft } from '@/lib/draft';
 import HarvestPanel from '@/components/config/HarvestPanel';
-import HeuristicsPanel from '@/components/config/HeuristicsPanel';
 
 const PLATFORMS = [
   { value: 'facebook', label: 'Facebook', hint: 'Feed & video ads' },
@@ -74,20 +73,20 @@ function formatKeywordPreview(keywords, max = 3) {
 
 function Section({ title, hint, children, className, error }) {
   return (
-    <div className={cn('rounded-2xl border border-border/60 bg-background/40 p-5 space-y-4', error && 'border-destructive/60', className)}>
+    <section className={cn('space-y-4 border-t border-border pt-6 first:border-0 first:pt-0', error && 'border-destructive/50', className)}>
       <div className="space-y-1">
-        <h4 className="panel-title flex items-center gap-2">{title}</h4>
+        <h4 className="text-sm font-medium text-foreground">{title}</h4>
         {hint && <p className="text-xs leading-relaxed text-muted-foreground">{hint}</p>}
       </div>
       {children}
-    </div>
+    </section>
   );
 }
 
-function ChoiceCard({ selected, onSelect, title, description, icon, tag, tagTone }) {
+function ChoiceCard({ selected, onSelect, title, description, tag, tagTone }) {
   const tagTones = {
     optional: 'bg-muted text-muted-foreground',
-    required: 'bg-primary/15 text-primary',
+    required: 'bg-secondary text-foreground',
   };
 
   return (
@@ -96,18 +95,17 @@ function ChoiceCard({ selected, onSelect, title, description, icon, tag, tagTone
       onClick={onSelect}
       aria-pressed={selected}
       className={cn(
-        'group relative flex w-full items-start gap-3 rounded-xl border-2 p-4 text-left transition-all',
+        'group relative flex w-full items-start gap-3 rounded-md border p-4 text-left transition-colors',
         selected
-          ? 'border-primary bg-primary/10 shadow-[0_0_0_1px_hsl(var(--primary)/0.4)]'
-          : 'border-border/60 bg-background/40 hover:border-primary/40 hover:bg-accent/40'
+          ? 'border-foreground/30 bg-secondary'
+          : 'border-border/60 bg-background/40 hover:border-foreground/20 hover:bg-accent/40'
       )}
     >
-      <span className={cn('mt-0.5 text-lg', !selected && 'opacity-60 group-hover:opacity-100')}>{icon}</span>
       <span className="flex-1 space-y-1">
         <span className="flex flex-wrap items-center gap-2">
           <span className="text-sm font-semibold text-foreground">{title}</span>
           {tag && (
-            <span className={cn('rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide', tagTones[tagTone] || tagTones.optional)}>
+            <span className={cn('rounded px-2 py-0.5 text-[11px] font-medium', tagTones[tagTone] || tagTones.optional)}>
               {tag}
             </span>
           )}
@@ -116,7 +114,7 @@ function ChoiceCard({ selected, onSelect, title, description, icon, tag, tagTone
       </span>
       <span
         className={cn(
-          'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 transition-colors',
+          'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors',
           selected ? 'border-primary bg-primary' : 'border-muted-foreground/40'
         )}
       >
@@ -165,7 +163,7 @@ function KeywordInput({ keywords, onChange, error }) {
     <div className="space-y-3">
       <div
         className={cn(
-          'flex flex-col gap-2 rounded-xl border bg-background/60 p-2 transition-colors sm:flex-row sm:items-center',
+          'flex flex-col gap-2 rounded-md border bg-background p-2 transition-colors sm:flex-row sm:items-center',
           error ? 'border-destructive' : 'border-input focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/30'
         )}
       >
@@ -189,7 +187,6 @@ function KeywordInput({ keywords, onChange, error }) {
           className="shrink-0"
           aria-label="Add keyword"
         >
-          <span className="text-base leading-none" aria-hidden="true">+</span>
           Add
         </Button>
       </div>
@@ -199,7 +196,7 @@ function KeywordInput({ keywords, onChange, error }) {
           {keywords.map((keyword, index) => (
             <span
               key={`${keyword}-${index}`}
-              className="group inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 py-1 pl-3 pr-1.5 text-xs font-medium text-foreground"
+              className="group inline-flex items-center gap-2 rounded-md border border-border bg-secondary py-1 pl-3 pr-1.5 text-xs font-medium text-foreground"
             >
               <span className="max-w-[16rem] truncate">{keyword}</span>
               <button
@@ -221,7 +218,7 @@ function KeywordInput({ keywords, onChange, error }) {
         </p>
       )}
       <p className="text-xs text-muted-foreground">
-        {keywords.length} keyword{keywords.length === 1 ? '' : 's'} added. Press Enter or the + button to add each one.
+        {keywords.length} keyword{keywords.length === 1 ? '' : 's'} added. Press Enter to add each one.
       </p>
     </div>
   );
@@ -416,22 +413,13 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
 
   return (
     <>
-    <Card className="animate-fade-up">
+    <Card>
       <CardHeader>
-        <div className="flex items-start gap-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/15 text-lg" aria-hidden="true">
-            🔍
-          </span>
-          <div className="space-y-1">
-            <CardTitle>Search Filters</CardTitle>
-            <CardDescription>
-              Tell Tesserae what to look for. Everything here has a sensible default — you only need to add your keywords.
-            </CardDescription>
-          </div>
-        </div>
+        <CardTitle>Search settings</CardTitle>
+        <CardDescription>Only keywords are required. Everything else has a sensible default.</CardDescription>
       </CardHeader>
 
-      <CardContent className="space-y-4">
+      <CardContent className="space-y-6">
         {lens && (
           <Section
             title="Profile this search runs under"
@@ -442,8 +430,8 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
               <p className="text-sm text-foreground">
                 {lens.about || 'Untitled profile'}
               </p>
-              <Link href="/about" className="text-xs font-semibold text-primary hover:underline">
-                Change profile on the About you page →
+              <Link href="/about" className="text-xs font-medium text-foreground underline underline-offset-4">
+                Change profile
               </Link>
               {lensError && (
                 <p className="text-xs text-destructive">Could not load your profile: {lensError}</p>
@@ -465,8 +453,8 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
           {lastKeywords.length > 0 && (
             <label
               className={cn(
-                'flex cursor-pointer items-start gap-3 rounded-xl border-2 p-4 transition-all',
-                useLastKeywords ? 'border-primary bg-primary/10' : 'border-border/60 hover:border-primary/40'
+                'flex cursor-pointer items-start gap-3 rounded-md border p-4 transition-all',
+                useLastKeywords ? 'border-foreground/30 bg-secondary' : 'border-border/60 hover:border-foreground/20'
               )}
             >
               <input
@@ -511,16 +499,15 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
               onClick={selectAllPlatforms}
               aria-pressed={allPlatformsSelected}
               className={cn(
-                'flex w-full items-center gap-3 rounded-xl border-2 px-4 py-3 text-left transition-all',
-                allPlatformsSelected ? 'border-primary bg-primary/10' : 'border-border/60 hover:border-primary/40'
+                'flex w-full items-center gap-3 rounded-md border px-4 py-3 text-left transition-all',
+                allPlatformsSelected ? 'border-foreground/30 bg-secondary' : 'border-border/60 hover:border-foreground/20'
               )}
             >
-              <span className="text-lg" aria-hidden="true">🌐</span>
               <span className="flex-1">
                 <span className="block text-sm font-semibold text-foreground">All platforms</span>
                 <span className="block text-xs text-muted-foreground">Facebook, Instagram, Messenger, Audience Network, WhatsApp &amp; Threads</span>
               </span>
-              <span className="text-xs font-semibold text-primary">Recommended</span>
+              <span className="text-xs text-muted-foreground">Recommended</span>
             </button>
 
             <div className="grid gap-2 sm:grid-cols-2">
@@ -534,13 +521,13 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
                     onClick={() => togglePlatform(platform.value)}
                     aria-pressed={selected}
                     className={cn(
-                      'flex items-center gap-3 rounded-xl border px-4 py-3 text-left transition-all',
-                      selected ? 'border-primary/70 bg-primary/5' : 'border-border/60 hover:border-primary/40 hover:bg-accent/40'
+                      'flex items-center gap-3 rounded-md border px-4 py-3 text-left transition-all',
+                      selected ? 'border-foreground/30 bg-secondary' : 'border-border/60 hover:border-foreground/20 hover:bg-accent/40'
                     )}
                   >
                     <span
                       className={cn(
-                        'flex h-4 w-4 shrink-0 items-center justify-center rounded border-2 transition-colors',
+                        'flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors',
                         selected ? 'border-primary bg-primary' : 'border-muted-foreground/40'
                       )}
                     >
@@ -572,7 +559,6 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
             <ChoiceCard
               selected={formData.run_mode === 'generate'}
               onSelect={() => update('run_mode', 'generate')}
-              icon="🤖"
               tag="Keywords optional"
               tagTone="optional"
               title="Let AI generate keywords for me"
@@ -581,7 +567,6 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
             <ChoiceCard
               selected={formData.run_mode === 'existing'}
               onSelect={() => update('run_mode', 'existing')}
-              icon="🔍"
               tag="Keywords required"
               tagTone="required"
               title="Only use my keywords"
@@ -594,8 +579,8 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
           <div className="space-y-4">
             <label
               className={cn(
-                'flex cursor-pointer items-start gap-3 rounded-xl border-2 p-4 transition-all',
-                formData.run_until_complete ? 'border-primary bg-primary/10' : 'border-border/60 hover:border-primary/40'
+                'flex cursor-pointer items-start gap-3 rounded-md border p-4 transition-all',
+                formData.run_until_complete ? 'border-foreground/30 bg-secondary' : 'border-border/60 hover:border-foreground/20'
               )}
             >
               <input
@@ -612,7 +597,7 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
               </span>
             </label>
 
-            <div className="flex flex-col gap-3 rounded-xl border border-border/60 p-4 sm:flex-row sm:items-center">
+            <div className="flex flex-col gap-3 rounded-md border border-border/60 p-4 sm:flex-row sm:items-center">
               <label htmlFor="parallel_workers" className="text-sm font-medium text-foreground sm:w-40">
                 Search speed
               </label>
@@ -733,19 +718,6 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
           </div>
         </Section>
       </CardContent>
-
-      <CardFooter className="flex flex-col gap-3 border-t border-border/60 pt-5 sm:flex-row sm:items-center sm:justify-between">
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          {formData.keywords.length
-            ? `${formData.keywords.length} keyword${formData.keywords.length === 1 ? '' : 's'} · ${allPlatformsSelected ? 'all platforms' : `${formData.platforms.length} platform${formData.platforms.length === 1 ? '' : 's'}`}`
-            : formData.run_mode === 'generate'
-              ? 'No keywords added — the AI will write them from your About You.'
-              : 'Add at least one keyword to start a search.'}
-        </p>
-        <Button onClick={handleStart} loading={isStarting} size="lg" className="w-full sm:w-auto">
-          Start Search
-        </Button>
-      </CardFooter>
     </Card>
 
     {draftRestored && (
@@ -758,11 +730,6 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
       </p>
     )}
 
-    <HeuristicsPanel
-      patterns={formData.heuristic_patterns}
-      onChange={(next) => update('heuristic_patterns', next)}
-    />
-
     {formData.run_mode === 'generate' && (
       <HarvestPanel
         limit={formData.harvest_limit}
@@ -771,6 +738,24 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
         onKeywordsChange={setHarvestKeywords}
       />
     )}
+
+    {/* The start button belongs after every setting card, not in the middle of
+        them: the harvest card changes the search, so starting before reading
+        it is the wrong default. */}
+    <Card>
+      <CardFooter className="flex flex-col gap-3 pt-5 sm:flex-row sm:items-center sm:justify-between">
+        <p className="text-xs leading-relaxed text-muted-foreground">
+          {formData.keywords.length
+            ? `${formData.keywords.length} keyword${formData.keywords.length === 1 ? '' : 's'}, ${allPlatformsSelected ? 'all platforms' : `${formData.platforms.length} platform${formData.platforms.length === 1 ? '' : 's'}`}`
+            : formData.run_mode === 'generate'
+              ? 'No keywords added. The AI will write them from your profile.'
+              : 'Add at least one keyword to start a search.'}
+        </p>
+        <Button onClick={handleStart} loading={isStarting} size="lg" className="w-full sm:w-auto">
+          Start search
+        </Button>
+      </CardFooter>
+    </Card>
     </>
   );
 }

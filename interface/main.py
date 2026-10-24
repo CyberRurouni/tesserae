@@ -367,6 +367,36 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
         state["keywords"] = list(filters.keywords)
         state["total_keywords"] = total
 
+        # Resolve the profile before the orchestrator so the run state reports
+        # which lens it ran under. Accepted leads and universal junk are global
+        # and need no profile; only this profile's own rejections do.
+        from modules.profiles.active import ensure_active_profile, read_active
+        from modules.storage import resolve_lens_state
+
+        profile = await ensure_active_profile()
+        if not request.profile_id:
+            request = request.model_copy(update={"profile_id": profile.profile_id})
+        # The search UI has no request picker, so a run arrives without one. The
+        # lens resolves the active request as well; without it the deferred and
+        # held buckets are skipped and every parked ad is judged again.
+        lens = resolve_lens_state(request.profile_id, request.request_id)
+        request = request.model_copy(update={
+            "profile_id": lens.profile_id or profile.profile_id,
+            "request_id": lens.request_id,
+        })
+        state["profile_id"] = request.profile_id
+        from modules.profiles import store as profile_store
+
+        resolved_profile = profile_store.get_profile(request.profile_id)
+        state["profile_about"] = (
+            resolved_profile.about if resolved_profile else profile.about
+        )
+        state["request_id"] = request.request_id
+        state["thresholds"] = {
+            "profile": lens.profile_threshold,
+            "request": lens.request_threshold,
+        }
+
         # Open this run's live result store. From here until the run ends, judged
         # ads are APPENDED to it rather than merged into a file that has to be
         # rewritten whole every time — and because it lives in Redis, it survives
@@ -374,34 +404,11 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
         try:
             from modules.storage.run_results import begin_run
 
-            begin_run(run_id, filters.category)
+            begin_run(run_id, filters.category, state["thresholds"])
         except Exception as exc:  # noqa: BLE001 - results must still work without Redis
             logger.warning("⚠️ Live result store unavailable (%s) — results will be "
                            "written when the run ends", exc)
         state["progress"] = 5
-
-        # Resolve the profile before the orchestrator so the run state reports
-        # which lens it ran under. Accepted leads and universal junk are global
-        # and need no profile; only this profile's own rejections do.
-        from modules.profiles.active import (
-            active_request_id,
-            ensure_active_profile,
-            read_active,
-        )
-
-        profile = await ensure_active_profile()
-        if not request.profile_id:
-            request = request.model_copy(update={"profile_id": profile.profile_id})
-        # The search UI has no request picker, so a run arrives without one. Fall
-        # back to the active request — without it the deferred bucket is skipped
-        # and every parked ad gets judged again on the next run.
-        if not request.request_id:
-            active_request = active_request_id()
-            if active_request:
-                request = request.model_copy(update={"request_id": active_request})
-        state["profile_id"] = profile.profile_id
-        state["profile_about"] = profile.about
-        state["request_id"] = request.request_id
         state["phase"] = "starting"
         state["harvested_total"] = 0
         state["keywords_harvested"] = []
@@ -414,7 +421,7 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
         # that could have said why.
         state["parallel_workers"] = max(1, min(int(request.parallel_workers or 1), 3))
         state["run_mode"] = request.run_mode
-        state["profile_is_active"] = profile.profile_id == (
+        state["profile_is_active"] = request.profile_id == (
             read_active() or {}
         ).get("profile_id")
 
@@ -502,19 +509,21 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
                 live = state.get("live_results")
                 if not isinstance(live, dict):
                     live = state["live_results"] = {
-                        "accepted": [], "deferred": [],
+                        "accepted": [], "held": [], "deferred": [],
                         "judged_rejected": [], "ai_failed": [],
                     }
-                for bucket in ("accepted", "deferred", "judged_rejected", "ai_failed"):
+                for bucket in ("accepted", "held", "deferred",
+                               "judged_rejected", "ai_failed"):
                     incoming = rows.get(bucket) or []
                     if incoming:
                         live.setdefault(bucket, []).extend(incoming)
                 # `counts` is created here rather than reused: this branch runs
                 # before the harvest branch that would otherwise create it.
                 counts = state.setdefault(
-                    "counts", {"accepted": 0, "rejected": 0, "ai_failed": 0}
+                    "counts", {"accepted": 0, "held": 0, "rejected": 0, "ai_failed": 0}
                 )
                 counts["accepted"] = len(live["accepted"])
+                counts["held"] = len(live["held"])
                 counts["rejected"] = len(live["judged_rejected"])
                 counts["ai_failed"] = len(live["ai_failed"])
                 return
@@ -545,7 +554,7 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
                     keyword, int(event.get("batch_size") or 0), int(event.get("harvested") or 0),
                 )
                 counts = state.setdefault(
-                    "counts", {"accepted": 0, "rejected": 0, "ai_failed": 0}
+                    "counts", {"accepted": 0, "held": 0, "rejected": 0, "ai_failed": 0}
                 )
                 total = max(1, state.get("total_keywords") or 1)
                 done = len(state.get("keywords_harvested") or [])
@@ -569,6 +578,8 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
             max(1, min(int(request.parallel_workers or 1), 3)),
             harvest_limit=max(0, int(request.harvest_limit or 0)),
             harvest_keywords=request.harvest_keywords or None,
+            profile_threshold=state["thresholds"]["profile"],
+            request_threshold=state["thresholds"]["request"],
             on_progress=on_progress,
             on_step=on_step,
             # Read by the run itself, not by this function: a cooperative stop
@@ -577,7 +588,9 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
             should_stop=lambda: bool(run_states.get(run_id, {}).get("cancel_requested")),
         )
 
-        counts = state.setdefault("counts", {"accepted": 0, "rejected": 0, "ai_failed": 0})
+        counts = state.setdefault(
+            "counts", {"accepted": 0, "held": 0, "rejected": 0, "ai_failed": 0}
+        )
         counts["accepted"] = int(summary.get("relevant_ads", 0))
         counts["rejected"] = int(summary.get("rejected_ads", 0) or 0)
 
@@ -712,7 +725,7 @@ async def start_run(request: RunRequest, background_tasks: BackgroundTasks):
         "progress": 0,
         "current_keyword": None,
         "keywords": request.keywords or [],
-        "counts": {"accepted": 0, "rejected": 0, "ai_failed": 0},
+        "counts": {"accepted": 0, "held": 0, "rejected": 0, "ai_failed": 0},
         "started_at": datetime.now().isoformat(),
         "config": request.model_dump(),
     }
@@ -800,6 +813,7 @@ async def list_runs(limit: int = 50):
                     "started_at": data.get("recorded_at", ""),
                     "counts": {
                         "accepted": len(data.get("accepted", []) or []),
+                        "held": len(data.get("held", []) or []),
                         "rejected": len(data.get("judged_rejected", []) or []),
                         "ai_failed": len(data.get("ai_failed", []) or []),
                     },
@@ -815,7 +829,10 @@ async def list_runs(limit: int = 50):
                     "status": state.get("status"),
                     "started_at": state.get("started_at", ""),
                     "progress": state.get("progress", 0),
-                    "counts": state.get("counts", {"accepted": 0, "rejected": 0, "ai_failed": 0}),
+                    "counts": state.get(
+                        "counts",
+                        {"accepted": 0, "held": 0, "rejected": 0, "ai_failed": 0},
+                    ),
                 }
             )
 
@@ -842,9 +859,11 @@ async def get_run(run_id: str):
         "data": data,
         "counts": {
             "accepted": len(data.get("accepted", []) or []),
+            "held": len(data.get("held", []) or []),
             "rejected": len(data.get("judged_rejected", []) or []),
             "ai_failed": len(data.get("ai_failed", []) or []),
         },
+        "thresholds": data.get("thresholds"),
         "started_at": data.get("recorded_at", ""),
     }
 

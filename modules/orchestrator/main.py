@@ -31,6 +31,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from core import (
+    AdRecord,
+    AdRelevanceVerdict,
     KeywordGenerationRequest,
     KeywordStats,
     PoolReviewRequest,
@@ -40,9 +42,11 @@ from core import (
 )
 
 from modules.checkpoints import judge_ad_relevance
+from modules.checkpoints.relevance import judge_request_relevance
+from modules.profiles import held as held_store
 from modules.scraper import browser_session, run_scrape
 from modules.scraper.seen import RunSeenIds
-from modules.storage import record_results, resolve_lens
+from modules.storage import record_results, resolve_lens_state
 
 from . import actors
 from . import collection as coll
@@ -53,6 +57,140 @@ logger = logging.getLogger(__name__)
 def _profile_text(about: str) -> str:
     """About-us text handed to Actors 1 & 3 (additional filters go to the judge only)."""
     return about
+
+
+async def _regate_held(
+    config: RunConfig,
+    category_id: str,
+    request_text: str,
+    profile_threshold: float,
+    request_threshold: float,
+    *,
+    run_id: str | None,
+    searched_keywords: list[str],
+) -> None:
+    """
+    Reconsider held ads after a threshold was lowered.
+
+    A threshold at or above the one the ad already missed means it stays parked
+    — that is the skip, and it costs no AI. A lower threshold re-gates the
+    stored confidence: request-stage holds can be promoted locally, while a
+    profile-stage hold needs exactly one request-judge call because its profile
+    answer has not changed.
+    """
+    profile_id = config.profile_id
+    if not profile_id:
+        return
+
+    records = held_store.load(profile_id)
+    if not records:
+        return
+
+    direct_ads: list[AdRecord] = []
+    direct_verdicts: dict[str, AdRelevanceVerdict] = {}
+    request_candidates: list[AdRecord] = []
+    updated = skipped = 0
+
+    for record in records:
+        stage = record.get("stage")
+        if stage == held_store.HELD_STAGE_REQUEST:
+            if not config.request_id or record.get("request_id") != config.request_id:
+                continue
+            threshold = request_threshold
+        elif stage == held_store.HELD_STAGE_PROFILE:
+            threshold = profile_threshold
+        else:
+            continue
+
+        if held_store.skip_for(record, profile_threshold, request_threshold):
+            skipped += 1
+            continue
+
+        ad_id = record.get("ad_archive_id")
+        if not ad_id:
+            continue
+        if not held_store.clears(record, threshold):
+            held_store.update_threshold(
+                profile_id, ad_id, threshold,
+                stage=stage,
+                request_id=record.get("request_id"),
+            )
+            updated += 1
+            continue
+
+        raw_ad = record.get("ad") or {}
+        try:
+            ad = AdRecord(**raw_ad)
+        except Exception as exc:  # noqa: BLE001 - a corrupt hold must not stop a run
+            logger.warning("⚠️ Held ad %s has an unreadable record (%s) — skipping it",
+                           ad_id, exc)
+            continue
+
+        if stage == held_store.HELD_STAGE_REQUEST or not request_text.strip():
+            direct_ads.append(ad)
+            direct_verdicts[ad_id] = AdRelevanceVerdict(
+                ad_archive_id=ad_id,
+                outcome="accepted",
+                confidence=float(record.get("confidence") or 1.0),
+                reason=str(record.get("reason") or "promoted after a lower threshold"),
+                ad_category=str(record.get("ad_category") or ""),
+                request_id=config.request_id,
+                stage=stage,
+            )
+        else:
+            request_candidates.append(ad)
+
+    if direct_ads:
+        summary = record_results(
+            direct_ads, direct_verdicts, category_id, config.filters,
+            run_id=run_id, searched_keywords=searched_keywords,
+            profile_id=profile_id, request_id=config.request_id,
+            profile_threshold=profile_threshold,
+            request_threshold=request_threshold,
+        )
+        logger.info(
+            "🤔 Re-gated %d held ad(s): %d promoted without AI",
+            len(direct_ads), len(summary.get("accepted") or []),
+        )
+
+    if request_candidates:
+        verdicts = await judge_request_relevance(
+            request_candidates,
+            request_text,
+            request_id=config.request_id,
+            request_threshold=request_threshold,
+        )
+        # The request judge does not return a category. The held record already
+        # has the profile judge's label; keep it rather than overwriting it with
+        # an empty string when this ad is accepted or held again.
+        categories = {
+            record.get("ad_archive_id"): record.get("ad_category", "")
+            for record in records
+        }
+        for ad_id, verdict in list(verdicts.items()):
+            if not verdict.ad_category and categories.get(ad_id):
+                verdicts[ad_id] = verdict.model_copy(update={
+                    "ad_category": categories[ad_id],
+                })
+        summary = record_results(
+            request_candidates, verdicts, category_id, config.filters,
+            run_id=run_id, searched_keywords=searched_keywords,
+            profile_id=profile_id, request_id=config.request_id,
+            profile_threshold=profile_threshold,
+            request_threshold=request_threshold,
+        )
+        logger.info(
+            "🤔 Re-gated %d profile-held ad(s): %d accepted, %d still held, "
+            "%d deferred",
+            len(request_candidates), len(summary.get("accepted") or []),
+            len(summary.get("held") or []), len(summary.get("deferred") or []),
+        )
+
+    if skipped or updated:
+        logger.info(
+            "🤔 Held ads checked: %d still above the new threshold, %d updated "
+            "because confidence still missed it", skipped, updated,
+        )
 
 
 def _stats_for_round(
@@ -100,6 +238,8 @@ async def run_orchestrator(
     run_id: str | None = None,
     profile_id: str | None = None,
     request_id: str | None = None,
+    profile_threshold: float | None = None,
+    request_threshold: float | None = None,
     on_progress=None,
     should_stop=None,
     on_step=None,
@@ -128,26 +268,36 @@ async def run_orchestrator(
 
     # ONE lens for the whole run, resolved once from the profile store.
     #
-    # The keyword generator and the relevance judge used to read different
-    # things: the generator was handed the profile store's text, while the judge
-    # was handed config.profile.background, which came from a separate text file.
-    # They agreed only as long as that file was kept in sync — and when it was
-    # not, a run would hunt for one person and grade the results for another,
-    # with nothing on screen to say so.
-    #
-    # Now both read the same resolved field, so they cannot disagree.
-    about, additional_filters = resolve_lens(config.profile_id, config.request_id)
+    # The keyword generator and both relevance judges read the same resolved
+    # object, so a run cannot hunt for one person and grade the results for
+    # another. Thresholds ride with the request and are snapshotted here; the
+    # API may pass the exact values it displayed so a mid-run save cannot move
+    # the goalposts underneath an active run.
+    lens = resolve_lens_state(config.profile_id, config.request_id)
+    about = lens.profile_text
+    additional_filters = lens.request_text
+    profile_threshold = (
+        lens.profile_threshold if profile_threshold is None else profile_threshold
+    )
+    request_threshold = (
+        lens.request_threshold if request_threshold is None else request_threshold
+    )
+    config = config.model_copy(update={
+        "profile": UserProfile(background=about),
+        "profile_id": lens.profile_id,
+        "request_id": lens.request_id,
+    })
     if not about.strip():
         logger.warning(
             "⚠️ No profile text resolved — the AI actors have nothing to judge against. "
             "Write your profile on the 'About you' page."
         )
-    config = config.model_copy(update={"profile": UserProfile(background=about)})
     logger.info(
-        "🔎 Lens resolved: profile=%s request=%s (%d chars of profile text)",
+        "🔎 Lens resolved: profile=%s request=%s (%d chars of profile text), "
+        "strictness profile=%.2f request=%.2f",
         config.profile_id or "(active)",
         config.request_id or "(none)",
-        len(about),
+        len(about), profile_threshold, request_threshold,
     )
 
     logger.info(
@@ -166,6 +316,16 @@ async def run_orchestrator(
     searched_keywords: list[str] = []
     totals["searched_keywords"] = searched_keywords
 
+    # Lowering a threshold is supposed to reconsider ads already held. Do that
+    # before scraping, so the run can report promotions even when every keyword
+    # is skipped: profile-held ads need one request call, request-held ads need
+    # none at all.
+    await _regate_held(
+        config, category_id, additional_filters,
+        profile_threshold, request_threshold,
+        run_id=run_id, searched_keywords=searched_keywords,
+    )
+
     async with browser_session(headless=headless) as context:
         # ──────────────────────────────────────────────────────────────
         # EXISTING MODE: provided keywords ONCE, then stop (no AI at all)
@@ -179,6 +339,8 @@ async def run_orchestrator(
                     user_keywords, config, additional_filters, context, run_id,
                     searched_keywords, run_seen, on_progress,
                     should_stop=should_stop, on_step=on_step,
+                    profile_threshold=profile_threshold,
+                    request_threshold=request_threshold,
                 )
                 totals["cycles"] = 1
                 totals["keywords_searched"] += len(user_keywords)
@@ -243,6 +405,8 @@ async def run_orchestrator(
                     round_keywords, config, additional_filters, context, run_id,
                     searched_keywords, run_seen, on_progress,
                     should_stop=should_stop, on_step=on_step,
+                    profile_threshold=profile_threshold,
+                    request_threshold=request_threshold,
                 )
                 totals["cycles"] += 1
                 totals["keywords_searched"] += len(round_keywords)
@@ -284,6 +448,8 @@ async def run_orchestrator(
                 search_array, config, additional_filters, context, run_id,
                 searched_keywords, run_seen, on_progress,
                 should_stop=should_stop, on_step=on_step,
+                profile_threshold=profile_threshold,
+                request_threshold=request_threshold,
             )
             totals["cycles"] += 1
             totals["keywords_searched"] += len(search_array)
@@ -401,6 +567,8 @@ async def _search_and_judge(
     on_progress=None,
     should_stop=None,
     on_step=None,
+    profile_threshold: float = 0.5,
+    request_threshold: float = 0.5,
 ) -> tuple[int, dict[str, int], dict[str, int]]:
     """
     Scrape and judge `keywords`, judging and saving each keyword as it lands.
@@ -477,12 +645,16 @@ async def _search_and_judge(
             # two different people.
             profile_text=config.profile.background,
             request_id=config.request_id,
+            profile_threshold=profile_threshold,
+            request_threshold=request_threshold,
             on_batch=_tick,
         )
         summary = record_results(
             ads, verdicts, config.filters.category, config.filters,
             run_id=run_id, searched_keywords=searched_keywords,
-            profile_id=config.profile_id,
+            profile_id=config.profile_id, request_id=config.request_id,
+            profile_threshold=profile_threshold,
+            request_threshold=request_threshold,
         )
         for ad in summary["accepted"]:
             if ad.source_keyword in relevant_by_kw:
@@ -515,9 +687,8 @@ async def _search_and_judge(
                 # plain dicts the file stores. Both are flattened here so the
                 # page gets exactly the shape the finished file will have.
                 rows = {
-                    "accepted": [
-                        a.model_dump(mode="json") for a in summary.get("accepted") or []
-                    ],
+                    "accepted": summary.get("accepted_entries") or [],
+                    "held": summary.get("held") or [],
                     "deferred": summary.get("deferred") or [],
                     "judged_rejected": summary.get("judged_rejects") or [],
                     "ai_failed": summary.get("failed_ads") or [],
@@ -545,6 +716,8 @@ async def _search_and_judge(
         on_harvested=harvested if on_progress is not None else None,
         should_stop=should_stop,
         on_step=on_step,
+        profile_threshold=profile_threshold,
+        request_threshold=request_threshold,
     )
 
     # Keywords that produced nothing are still counted as searched, and any ads

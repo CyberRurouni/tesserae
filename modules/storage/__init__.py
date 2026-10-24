@@ -8,6 +8,12 @@ caller re-implements the marking logic and they WILL drift apart.
 """
 
 from .results import record_results
-from .profile import load_profile, resolve_lens
+from .profile import ResolvedLens, load_profile, resolve_lens, resolve_lens_state
 
-__all__ = ["record_results", "load_profile", "resolve_lens"]
+__all__ = [
+    "record_results",
+    "load_profile",
+    "resolve_lens",
+    "resolve_lens_state",
+    "ResolvedLens",
+]

@@ -137,13 +137,21 @@ def save_request(request_obj: ProfileRequest) -> ProfileRequest:
     return request_obj
 
 
-def create_request(profile_id: str, request_text: str) -> ProfileRequest:
+def create_request(
+    profile_id: str,
+    request_text: str,
+    *,
+    profile_threshold: float = 0.5,
+    request_threshold: float = 0.5,
+) -> ProfileRequest:
     return save_request(
         ProfileRequest(
             request_id=new_request_id(profile_id),
             profile_id=profile_id,
             request_text=request_text,
             founding_text=request_text,
+            profile_threshold=profile_threshold,
+            request_threshold=request_threshold,
         )
     )
 

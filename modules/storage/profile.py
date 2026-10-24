@@ -13,6 +13,7 @@ still be able to happen — it will just judge against nothing, and say so.
 """
 
 import logging
+from dataclasses import dataclass
 
 from modules.profiles import active as active_module
 from modules.profiles import store
@@ -20,9 +21,23 @@ from modules.profiles import store
 logger = logging.getLogger(__name__)
 
 
-def resolve_lens(profile_id: str | None = None, request_id: str | None = None) -> tuple[str, str]:
+@dataclass(frozen=True)
+class ResolvedLens:
+    """One run's profile, request and strictness, resolved together."""
+
+    profile_id: str | None
+    request_id: str | None
+    profile_text: str
+    request_text: str
+    profile_threshold: float
+    request_threshold: float
+
+
+def resolve_lens_state(
+    profile_id: str | None = None, request_id: str | None = None,
+) -> ResolvedLens:
     """
-    The profile text and request text for one run.
+    Everything one run needs from the profile store, in one lookup.
 
     An explicitly named profile wins over the active pointer: the caller said
     which one it means, and second-guessing that is how a run ends up judged
@@ -40,7 +55,11 @@ def resolve_lens(profile_id: str | None = None, request_id: str | None = None) -
 
     if profile is None:
         logger.warning("⚠️ No profile exists — the AI actors will have no context to judge against")
-        return "", ""
+        # Keep an explicitly named lens so run-scoped state (keyword collection,
+        # seen ids) is still scoped to what the caller asked for. There is no
+        # store entry to override it with, and inventing None would make two
+        # different missing profiles share one collection.
+        return ResolvedLens(profile_id, request_id, "", "", 0.5, 0.5)
 
     text = profile.profile_text or ""
     if not text.strip():
@@ -56,20 +75,40 @@ def resolve_lens(profile_id: str | None = None, request_id: str | None = None) -
         # global pointer instead would name the active profile's request, which
         # belongs to somebody else whenever the run is under a different one.
         wanted = active_module.request_for_profile(profile.profile_id)
+
     request_text = ""
+    request_obj = None
     if wanted:
-        request = store.get_request(wanted)
+        request_obj = store.get_request(wanted)
         # A request id from a DIFFERENT profile would scope this run's
         # accept-vs-defer decisions to someone else's wishes.
-        if request and request.profile_id == profile.profile_id:
-            request_text = request.request_text or ""
-        elif request:
+        if request_obj and request_obj.profile_id == profile.profile_id:
+            request_text = request_obj.request_text or ""
+        elif request_obj:
             logger.warning(
                 "⚠️ Request %r belongs to profile %r, not %r — ignoring it",
-                wanted, request.profile_id, profile.profile_id,
+                wanted, request_obj.profile_id, profile.profile_id,
             )
+            request_obj = None
 
-    return text, request_text
+    return ResolvedLens(
+        profile_id=profile.profile_id,
+        request_id=request_obj.request_id if request_obj else None,
+        profile_text=text,
+        request_text=request_text,
+        profile_threshold=(
+            request_obj.profile_threshold if request_obj else 0.5
+        ),
+        request_threshold=(
+            request_obj.request_threshold if request_obj else 0.5
+        ),
+    )
+
+
+def resolve_lens(profile_id: str | None = None, request_id: str | None = None) -> tuple[str, str]:
+    """(profile_text, request_text). See `resolve_lens_state` for the full lens."""
+    lens = resolve_lens_state(profile_id, request_id)
+    return lens.profile_text, lens.request_text
 
 
 def load_profile() -> tuple[str, str]:

@@ -118,7 +118,7 @@ export default function HeuristicsPanel({ patterns, onChange }) {
 
                 <div className="flex flex-wrap gap-2">
                   {(meta?.builtin?.[field] || []).map((p) => (
-                    <Badge key={`b-${p}`} variant="outline">{p} · built in</Badge>
+                    <Badge key={`b-${p}`} variant="outline">{p} (built in)</Badge>
                   ))}
                 </div>
 
@@ -128,7 +128,7 @@ export default function HeuristicsPanel({ patterns, onChange }) {
                     return (
                       <span
                         key={p}
-                        className="inline-flex items-center gap-2 rounded-full border border-primary/30 bg-primary/10 px-3 py-1 text-sm text-primary"
+                        className="inline-flex items-center gap-2 rounded-md border border-border bg-secondary px-3 py-1 text-sm text-foreground"
                       >
                         {p}
                         {typeof hits === 'number' && (

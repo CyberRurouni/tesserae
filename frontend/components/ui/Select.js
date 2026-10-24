@@ -7,13 +7,12 @@ const Select = forwardRef(({ className, label, error, hint, id, options = [], pl
   const selectId = id || label?.toLowerCase().replace(/\s+/g, '-');
   const errorId = `${selectId}-error`;
   const hintId = `${selectId}-hint`;
-  
   const describedBy = [error && errorId, hint && hintId].filter(Boolean).join(' ') || undefined;
 
   return (
     <div className="w-full">
       {label && (
-        <label htmlFor={selectId} className="block text-sm font-medium text-foreground mb-1.5">
+        <label htmlFor={selectId} className="mb-1.5 block text-[13px] font-medium text-foreground">
           {label}
         </label>
       )}
@@ -21,7 +20,7 @@ const Select = forwardRef(({ className, label, error, hint, id, options = [], pl
         ref={ref}
         id={selectId}
         className={cn(
-          'flex h-10 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50',
+          'flex h-9 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground transition-colors focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50',
           error && 'border-destructive focus-visible:ring-destructive',
           className
         )}
@@ -48,7 +47,7 @@ const Select = forwardRef(({ className, label, error, hint, id, options = [], pl
         </p>
       )}
       {hint && !error && (
-        <p id={hintId} className="mt-1.5 text-sm text-muted-foreground">
+        <p id={hintId} className="mt-1.5 text-xs text-muted-foreground">
           {hint}
         </p>
       )}

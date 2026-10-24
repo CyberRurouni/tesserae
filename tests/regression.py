@@ -213,8 +213,12 @@ def test_judge():
         check("not_for_me parsed", out["j_2"].rejection_kind == "not_for_me")
         check("accepted", out["j_4"].outcome == "accepted")
         check("garbage kind falls to the safe end", out["j_5"].rejection_kind == "not_for_me")
-        check("stage 1 asks about employment",
-              any("offer actual employment to anyone" in m["content"] for m in Stub.prompts[-1]))
+        check("profile judge asks about employment",
+              any("offer actual employment to anyone" in m["content"]
+                  for m in Stub.prompts[0]))
+        check("profile judge is never given the request",
+              all("REQUEST (what they want RIGHT NOW" not in m["content"]
+                  for m in Stub.prompts[0]))
 
         Stub.payload = RuntimeError("model down")
         out = asyncio.run(rel.judge_ad_relevance(ads[:1], intent="jobs", additional_filters="r"))
@@ -494,7 +498,8 @@ def test_cycles():
 
     async def scrape(filters, headless=False, context=None, run_seen_ids=None,
                      profile_id=None, request_id=None, parallel_workers=1,
-                     on_harvested=None, should_stop=None, on_step=None):
+                     on_harvested=None, should_stop=None, on_step=None,
+                     profile_threshold=None, request_threshold=None):
         calls["searches"].append(list(filters.keywords))
         ads = [AdRecord(
             ad_archive_id=f"kw_{k}", advertiser_name="A", ad_text="We are hiring",
@@ -630,7 +635,8 @@ def test_cycles():
                                            run_seen_ids=None, profile_id=None,
                                            request_id=None, parallel_workers=1,
                                            on_harvested=None, should_stop=None,
-                                           on_step=None):
+                                           on_step=None, profile_threshold=None,
+                                           request_threshold=None):
         saved_calls = []
         for i, kw in enumerate(filters.keywords):
             ads_here = [AdRecord(ad_archive_id=f"k{i}_{j}", advertiser_name="A",
@@ -670,10 +676,13 @@ def test_cycles():
 
     async def scrape2(filters, headless=False, context=None, run_seen_ids=None,
                       profile_id=None, request_id=None, parallel_workers=1,
-                      on_harvested=None, should_stop=None, on_step=None):
+                      on_harvested=None, should_stop=None, on_step=None,
+                      profile_threshold=None, request_threshold=None):
         seen_scrape["keywords"] = list(filters.keywords)
         seen_scrape["workers"] = parallel_workers
         seen_scrape["request_id"] = request_id
+        seen_scrape["profile_threshold"] = profile_threshold
+        seen_scrape["request_threshold"] = request_threshold
         if on_harvested:
             for i, kw in enumerate(filters.keywords):
                 out = on_harvested([], kw, i + 1)
@@ -1084,9 +1093,11 @@ def test_single_lens():
 
     src = inspect.getsource(om.run_orchestrator)
     check("the lens is resolved once, from the store",
-          "resolve_lens(config.profile_id, config.request_id)" in src)
+          "resolve_lens_state(config.profile_id, config.request_id)" in src)
     check("and written into the run config every consumer reads",
-          "config = config.model_copy(update={\"profile\": UserProfile(background=about)})" in src)
+          "\"profile\": UserProfile(background=about)" in src
+          and "\"profile_id\": lens.profile_id" in src
+          and "\"request_id\": lens.request_id" in src)
     judge_src = inspect.getsource(om._search_and_judge)
     check("the judge reads that same field",
           "profile_text=config.profile.background" in judge_src)
@@ -1175,7 +1186,8 @@ def test_cancellation():
         async def scrape_never(filters, headless=False, context=None,
                                run_seen_ids=None, profile_id=None, request_id=None,
                                parallel_workers=1, on_harvested=None,
-                               should_stop=None, on_step=None):
+                               should_stop=None, on_step=None,
+                               profile_threshold=None, request_threshold=None):
             calls["scrape"] += 1
             return []
 
@@ -1295,6 +1307,21 @@ def test_cancellation():
     check("the scraper threads it all the way to the scroll loop",
           scrape_src.count("should_stop") >= 4,
           f"{scrape_src.count('should_stop')} mentions")
+
+    # The backend half was right and the button still did nothing: the browser
+    # posted to /api/runs/{id}/cancel, and the only Next handler lived on
+    # /api/runs/{id}. Next matched no route for the extra segment, so the
+    # request never reached Python and no stop was ever requested.
+    fe = Path(__file__).resolve().parents[1] / "frontend"
+    cancel_route = fe / "app" / "api" / "runs" / "[id]" / "cancel" / "route.js"
+    check("the Stop button's URL has a route handler of its own",
+          cancel_route.exists(),
+          "a POST to /api/runs/{id}/cancel matched nothing, so Stop silently did nothing")
+    check("and that handler forwards to the backend's cancel endpoint",
+          cancel_route.exists() and "/api/runs/${id}/cancel" in cancel_route.read_text())
+    detail_src = (fe / "components" / "runs" / "RunDetail.js").read_text()
+    check("the button posts to that same URL",
+          "/api/runs/${runId}/cancel" in detail_src)
     path.unlink(missing_ok=True)
 
 
@@ -2216,6 +2243,383 @@ def test_heuristic_matching():
           and "to AI" in detail_sieve)
 
 
+def test_run_page_review_controls():
+    """
+    The run page is where the results get worked through, not just read.
+
+    Three things were missing there. A held-for-later ad could not be opened,
+    so the only way to check whether its skills were really yours was to
+    search Meta by hand. The Start button sat in the middle of the config page,
+    above the harvest card that changes the search. And an accepted-ad table
+    had no memory: every reload lost your place, so a long list could never be
+    worked through a bit at a time.
+    """
+    print("\n[36] the run page helps you work through the results")
+    fe = Path(__file__).resolve().parents[1] / "frontend"
+    detail = (fe / "components" / "runs" / "RunDetail.js").read_text()
+    builder = (fe / "components" / "config" / "FilterBuilder.js").read_text()
+
+    check("a held-for-later ad opens the actual ad on Meta",
+          "Open this ad on Meta" in detail
+          and "https://www.facebook.com/ads/library/?id=" in detail,
+          "the deferred bucket is where unfamiliar skills land, so it must be clickable")
+    check("seen state survives a reload",
+          "tesserae.seenAds" in detail and "localStorage" in detail)
+    check("and can be filtered, so what is left to review is obvious",
+          "'Unseen'" in detail and "Mark all seen" in detail
+          and "left to review" in detail)
+    check("the Start button comes after the harvest card",
+          builder.index("Start search") > builder.index("<HarvestPanel")
+          and "<HeuristicsPanel" not in builder,
+          "starting before reading the card that changes the search was the bug")
+    check("each run outcome gets its own compact card",
+          'bucket="held"' in detail and 'bucket="deferred"' in detail
+          and 'bucket="rejected"' in detail and 'bucket="ai_failed"' in detail,
+          "held, deferred, rejected and unjudged ads should be separate tables")
+    check("the run page shows one outcome at a time and defaults to accepted",
+          "useState('accepted')" in detail
+          and "switch (activeBucket)" in detail
+          and "setActiveBucket(id)" in detail,
+          "stacking every outcome on the page made the run too long to scan")
+
+
+def test_split_judge_and_held():
+    print("\n[9b] profile and request judges are separate, and confidence holds")
+    import modules.checkpoints.relevance as rel
+    from modules.profiles import held as held_store
+    from modules.profiles import store as profile_store
+    from modules.storage import resolve_lens_state
+    import modules.storage.results as results
+
+    class Stub:
+        replies = []
+        prompts = []
+
+        def __init__(self, *a, **k):
+            pass
+
+        async def blocking(self, messages, **kw):
+            Stub.prompts.append(messages)
+            reply = Stub.replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+    def row(ad_id, outcome, **kw):
+        return {"id": ad_id, "outcome": outcome, **kw}
+
+    original_ai = rel.AIClient
+    rel.AIClient = Stub
+    try:
+        ads = [AdRecord(ad_archive_id=i, source_keyword="kw", ad_text="t")
+               for i in ("s_a", "s_b", "s_c", "s_d")]
+        Stub.replies = [
+            {"verdicts": [
+                row("s_a", "accepted", confidence=0.9, category="Backend",
+                    reason="backend role"),
+                row("s_b", "accepted", confidence=0.55, category="Backend",
+                    reason="maybe backend"),
+                row("s_c", "rejected", rejection_kind="no_hiring", confidence=0.95),
+                row("s_d", "accepted", confidence=0.9, category="Backend"),
+            ]},
+            {"verdicts": [
+                row("s_a", "accepted", confidence=0.9, reason="matches request"),
+                row("s_b", "accepted", confidence=0.55, reason="shaky match"),
+                # A request may never reject. This must become deferred.
+                row("s_d", "rejected", confidence=0.9),
+            ]},
+        ]
+        out = asyncio.run(rel.judge_ad_relevance(
+            ads, intent="jobs", additional_filters="Must be remote",
+            profile_text="Backend engineer", profile_threshold=0.5,
+            request_threshold=0.7,
+        ))
+        check("profile accept above threshold is accepted", out["s_a"].outcome == "accepted")
+        check("request accept below threshold is held", out["s_b"].outcome == "held")
+        check("held records the request stage", out["s_b"].stage == "request")
+        check("held records the threshold it missed", out["s_b"].held_threshold == 0.7)
+        check("held is borderline at 0.55", out["s_b"].held_kind == "borderline")
+        check("no_hiring rejection is untouched by thresholds",
+              out["s_c"].outcome == "rejected" and out["s_c"].rejection_kind == "no_hiring")
+        check("a request cannot reject an ad", out["s_d"].outcome == "deferred",
+              out["s_d"].outcome)
+        check("the profile category survives the request stage",
+              out["s_a"].ad_category == "Backend"
+              and out["s_b"].ad_category == "Backend")
+        profile_prompt = " ".join(m["content"] for m in Stub.prompts[0])
+        request_prompt = Stub.prompts[1][1]["content"]
+        check("profile judge sees no request",
+              "Must be remote" not in profile_prompt)
+        check("request is placed before the ads in the request judge",
+              request_prompt.index("REQUEST") < request_prompt.index("candidate ads"),
+              "the request is the lens, not a trailing note")
+
+        # No request text: the request judge must not run at all.
+        Stub.prompts.clear()
+        Stub.replies = [{"verdicts": [
+            row("s_a", "accepted", confidence=0.9),
+            row("s_b", "accepted", confidence=0.55),
+            row("s_c", "rejected", rejection_kind="no_hiring"),
+        ]}]
+        out = asyncio.run(rel.judge_ad_relevance(
+            ads[:3], intent="jobs", additional_filters="",
+            profile_text="Backend engineer", profile_threshold=0.7,
+        ))
+        check("profile accept below profile threshold is held",
+              out["s_b"].outcome == "held" and out["s_b"].stage == "profile")
+        check("no request means no request-judge call", len(Stub.prompts) == 1,
+              f"{len(Stub.prompts)} call(s)")
+    finally:
+        rel.AIClient = original_ai
+
+    # ── the held store is stage-aware and local ────────────────────────────
+    pid = "prof_held_store"
+    a1 = ad("held_profile")
+    a2 = ad("held_request")
+    r1 = held_store.hold_ad(
+        pid, a1.model_dump(mode="json"), stage="profile", request_id="req_1",
+        confidence=0.6, threshold=0.7, reason="shaky profile match",
+    )
+    r2 = held_store.hold_ad(
+        pid, a2.model_dump(mode="json"), stage="request", request_id="req_1",
+        confidence=0.65, threshold=0.7, reason="shaky request match",
+    )
+    check("a profile hold is request-blind", r1.get("request_id") is None)
+    check("profile holds apply to another request",
+          any(x["ad_archive_id"] == "held_profile"
+              for x in held_store.for_lens(pid, "req_2")))
+    check("request holds do not apply to another request",
+          not any(x["ad_archive_id"] == "held_request"
+                  for x in held_store.for_lens(pid, "req_2")))
+    check("request holds apply to their own request",
+          any(x["ad_archive_id"] == "held_request"
+              for x in held_store.for_lens(pid, "req_1")))
+    check("the same threshold skips a held ad",
+          held_store.skip_for(r1, 0.7, 0.5))
+    check("a lower threshold re-checks it",
+          not held_store.skip_for(r1, 0.6, 0.5))
+    check("stored confidence can clear the lower threshold",
+          held_store.clears(r1, 0.55) and not held_store.clears(r1, 0.65))
+    held_store.update_threshold(pid, "held_profile", 0.6, stage="profile")
+    check("a re-gated miss updates the threshold it missed",
+          held_store.load(pid)[0]["held_threshold"] == 0.6)
+
+    # ── FilterIndex skips and re-checks held ads by stage ──────────────────
+    fi = FilterIndex("regression_held_filter", pid, "req_1", 0.7, 0.7).load()
+    check("held profile ad is skipped at the same threshold",
+          fi.check("held_profile") == (True, "held_profile"),
+          str(fi.check("held_profile")))
+    check("held request ad is skipped at the same threshold",
+          fi.check("held_request") == (True, "held_request"), str(fi.check("held_request")))
+    fi_low = FilterIndex("regression_held_filter", pid, "req_1", 0.5, 0.5).load()
+    check("lower thresholds re-check a profile-held ad",
+          fi_low.check("held_profile") == (False, "held_below_threshold"),
+          str(fi_low.check("held_profile")))
+    check("lower thresholds re-check a request-held ad",
+          fi_low.check("held_request") == (False, "held_below_threshold"),
+          str(fi_low.check("held_request")))
+    check("held ads are counted in the index stats", fi.stats()["held"] >= 1)
+
+    held_store.resolve(pid, "held_profile")
+    check("resolving a hold removes it",
+          not any(x["ad_archive_id"] == "held_profile" for x in held_store.load(pid)))
+    check("request hold still survives", bool(r2))
+
+    # ── record_results persists accepted reasons and the held bucket ───────
+    cat = "regression_held_results"
+    pid2 = "prof_held_results"
+    ads2 = [AdRecord(ad_archive_id=i, source_keyword="kw", ad_text="t", category=cat)
+            for i in ("res_a", "res_b", "res_c", "res_d")]
+    verdicts = {
+        "res_a": AdRelevanceVerdict(
+            ad_archive_id="res_a", outcome="accepted", confidence=0.9,
+            reason="clear backend fit", ad_category="Backend", stage="request"),
+        "res_b": AdRelevanceVerdict(
+            ad_archive_id="res_b", outcome="held", confidence=0.6,
+            reason="maybe backend", ad_category="Backend", stage="request",
+            held_threshold=0.8, held_kind="borderline"),
+        "res_c": AdRelevanceVerdict(
+            ad_archive_id="res_c", outcome="rejected", rejection_kind="no_hiring",
+            confidence=0.95, stage="profile"),
+        "res_d": AdRelevanceVerdict(
+            ad_archive_id="res_d", outcome="deferred", confidence=0.8,
+            reason="wrong location", stage="request"),
+    }
+    summary = results.record_results(
+        ads2, verdicts, cat, profile_id=pid2, request_id="req_1",
+        profile_threshold=0.6, request_threshold=0.8,
+    )
+    check("held is returned as its own bucket", len(summary["held"]) == 1)
+    check("accepted keeps its reason and confidence",
+          summary["accepted_entries"][0]["relevance_reason"] == "clear backend fit"
+          and summary["accepted_entries"][0]["relevance_confidence"] == 0.9)
+    check("accepted keeps the judge stage",
+          summary["accepted_entries"][0]["relevance_stage"] == "request")
+    check("the lead list carries the reason",
+          profile_store.load_leads(pid2)[0]["relevance_reason"] == "clear backend fit")
+    held_now = held_store.load(pid2)
+    check("held is stored with its threshold",
+          held_now and held_now[0]["held_threshold"] == 0.8)
+    check("held is not marked accepted or rejected",
+          not V.is_accepted(cat, "res_b") and not V.is_rejected(pid2, "res_b"))
+
+    # Promoting the held ad must remove the hold, not leave it behind.
+    promoted = results.record_results(
+        [ads2[1]],
+        {"res_b": AdRelevanceVerdict(
+            ad_archive_id="res_b", outcome="accepted", confidence=0.9,
+            reason="promoted", stage="request")},
+        cat, profile_id=pid2, request_id="req_1",
+        profile_threshold=0.6, request_threshold=0.8,
+    )
+    check("promoting a held ad accepts it", promoted["accepted"][0].ad_archive_id == "res_b")
+    check("promoting removes the hold",
+          not any(x["ad_archive_id"] == "res_b" for x in held_store.load(pid2)))
+
+    # ── the API can read holds and save thresholds ─────────────────────────
+    import interface.profiles_api as papi
+    created = profile_store.create_profile(about="held api", profile_text="Backend")
+    req = profile_store.create_request(
+        created.profile_id, "remote backend",
+        profile_threshold=0.7, request_threshold=0.8,
+    )
+    lens = resolve_lens_state(created.profile_id, req.request_id)
+    check("lens resolves the saved thresholds",
+          (lens.profile_threshold, lens.request_threshold) == (0.7, 0.8))
+    asyncio.run(papi.save_thresholds(papi.ThresholdsRequest(
+        profile_id=created.profile_id, request_id=req.request_id,
+        profile_threshold=0.6, request_threshold=0.9,
+    )))
+    saved_req = profile_store.get_request(req.request_id)
+    check("thresholds save endpoint updates the request",
+          (saved_req.profile_threshold, saved_req.request_threshold) == (0.6, 0.9))
+    check("held endpoint is exposed", callable(papi.get_held))
+
+
+def test_regate_held():
+    print("\n[9c] lowering a threshold promotes held ads without re-scraping")
+    import modules.orchestrator.main as om
+    from modules.profiles import held as held_store
+
+    cat = "regression_regate"
+    pid = "prof_regate"
+    req_id = "req_regate"
+    held_store.hold_ad(
+        pid, ad("regate_request").model_dump(mode="json"),
+        stage="request", request_id=req_id, confidence=0.6, threshold=0.7,
+        reason="shaky request", ad_category="Backend",
+    )
+    held_store.hold_ad(
+        pid, ad("regate_profile").model_dump(mode="json"),
+        stage="profile", request_id=None, confidence=0.6, threshold=0.7,
+        reason="shaky profile", ad_category="Backend",
+    )
+    cfg = RunConfig(
+        profile=UserProfile(background="Backend"), profile_id=pid,
+        request_id=req_id,
+        filters=ScrapingFilters(category=cat, keywords=[]),
+    )
+    calls = []
+    captured = {}
+
+    async def fake_judge(ads, request_text, **kw):
+        calls.append({"judge": [a.ad_archive_id for a in ads], "kw": kw})
+        return {
+            a.ad_archive_id: AdRelevanceVerdict(
+                ad_archive_id=a.ad_archive_id, outcome="accepted",
+                confidence=0.9, reason="request match", stage="request",
+            )
+            for a in ads
+        }
+
+    def fake_record(ads, verdicts, *a, **kw):
+        captured.update(verdicts)
+        calls.append({"record": [x.ad_archive_id for x in ads]})
+        return {"accepted": ads, "held": [], "deferred": []}
+
+    saved = (om.judge_request_relevance, om.record_results)
+    om.judge_request_relevance, om.record_results = fake_judge, fake_record
+    try:
+        asyncio.run(om._regate_held(
+            cfg, cat, "Must be remote", 0.5, 0.5,
+            run_id=None, searched_keywords=[],
+        ))
+        check("request-held ad is promoted without AI",
+              {"record": ["regate_request"]} in calls)
+        check("profile-held ad gets exactly one request-judge call",
+              {"judge": ["regate_profile"], "kw": {
+                  "request_id": req_id, "request_threshold": 0.5,
+              }} in calls)
+        check("profile-held ad is then recorded",
+              {"record": ["regate_profile"]} in calls)
+        check("re-gating keeps the category from the held record",
+              captured["regate_profile"].ad_category == "Backend"
+              and captured["regate_request"].ad_category == "Backend")
+
+        # Still above the missed threshold: skip, no AI and no record.
+        pid2 = "prof_regate_skip"
+        held_store.hold_ad(
+            pid2, ad("regate_skip").model_dump(mode="json"),
+            stage="request", request_id=req_id, confidence=0.6, threshold=0.7,
+        )
+        calls.clear()
+        cfg2 = cfg.model_copy(update={"profile_id": pid2})
+        asyncio.run(om._regate_held(
+            cfg2, cat, "Must be remote", 0.7, 0.7,
+            run_id=None, searched_keywords=[],
+        ))
+        check("a threshold that did not move skips the held ad", calls == [])
+
+        # Lower threshold but confidence still misses it: update the record.
+        pid3 = "prof_regate_low"
+        held_store.hold_ad(
+            pid3, ad("regate_low").model_dump(mode="json"),
+            stage="request", request_id=req_id, confidence=0.4, threshold=0.7,
+        )
+        calls.clear()
+        cfg3 = cfg.model_copy(update={"profile_id": pid3})
+        asyncio.run(om._regate_held(
+            cfg3, cat, "Must be remote", 0.5, 0.5,
+            run_id=None, searched_keywords=[],
+        ))
+        low = held_store.load(pid3)[0]
+        check("a confidence still below the new threshold stays held",
+              calls == [] and low["held_threshold"] == 0.5)
+        check("and it is filed as very low confidence", low["held_kind"] == "very_low")
+    finally:
+        om.judge_request_relevance, om.record_results = saved
+
+
+def test_threshold_ui():
+    print("\n[9d] the UI exposes strictness and the Not sure yet bucket")
+    fe = Path(__file__).resolve().parents[1] / "frontend"
+    detail = (fe / "components" / "runs" / "RunDetail.js").read_text()
+    looking = (fe / "app" / "looking-for" / "LookingForClient.js").read_text()
+    about = (fe / "app" / "about" / "AboutClient.js").read_text()
+    route = (fe / "app" / "api" / "runs" / "[id]" / "route.js").read_text()
+
+    check("the run page names the Not sure yet bucket", "Not sure yet" in detail)
+    check("and splits it by confidence kind",
+          "Borderline" in detail and "Extremely low confidence" in detail)
+    check("the run page shows why an accepted ad was accepted",
+          "Why accepted" in detail and "relevance_reason" in detail)
+    check("the run page shows the thresholds the run used",
+          "Strictness this run" in detail and "run.thresholds" in detail)
+    check("the request page has both strictness sliders",
+          looking.count('type="range"') >= 2 and "Save strictness" in looking)
+    check("the request page saves thresholds through the API",
+          "/request/thresholds" in looking)
+    check("the request page leaves held and deferred lists to the run page",
+          "/held" not in looking and "/deferred" not in looking
+          and "Held for later" not in looking)
+    check("the run API forwards held and thresholds",
+          "held," in route and "thresholds," in route)
+    check("the run API counts held ads",
+          "held: held.length" in route)
+    check("the About page leaves leads to the run page",
+          "/leads" not in about and "Leads (" not in about)
+
+
 def main():
     print("═" * 62)
     print("  Tesserae regression — sandbox:", _SANDBOX)
@@ -2224,6 +2628,8 @@ def main():
     test_record_routing()
     test_filter()
     test_judge()
+    test_split_judge_and_held()
+    test_regate_held()
     test_scraper()
     test_cycles()
     test_corrections()
@@ -2239,6 +2645,8 @@ def main():
     test_live_result_store()
     test_filters_reach_meta()
     test_heuristic_matching()
+    test_run_page_review_controls()
+    test_threshold_ui()
 
     # Leave nothing behind. Safe because TESSERAE_REDIS_DB_OFFSET moved these
     # databases off the ones the app uses.

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/Card';
 import { PageShell } from '@/components/Nav';
+import { Spinner } from '@/components/ui/Spinner';
 import { cn } from '@/lib/utils';
 
 const CLASSIFY_DEBOUNCE_MS = 1200;
@@ -14,7 +15,7 @@ function ChangeBanner({ verdict, busy }) {
 
   if (!verdict.new_profile_required) {
     return (
-      <div className="rounded-xl border border-success/40 bg-success/10 px-4 py-3 text-sm">
+      <div className="rounded-md border border-success/40 bg-success/10 px-4 py-3 text-sm">
         <p className="font-semibold text-foreground">No change to what you want</p>
         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
           {verdict.explanation || 'Same request, better wording.'} Ads already held back stay held
@@ -28,7 +29,7 @@ function ChangeBanner({ verdict, busy }) {
   return (
     <div
       className={cn(
-        'rounded-xl border px-4 py-3 text-sm',
+        'rounded-md border px-4 py-3 text-sm',
         widening ? 'border-info/40 bg-info/10' : 'border-warning/40 bg-warning/10'
       )}
     >
@@ -56,7 +57,10 @@ export default function LookingForClient() {
   const [classifying, setClassifying] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState(null);
-  const [deferred, setDeferred] = useState([]);
+  const [profileThreshold, setProfileThreshold] = useState(0.5);
+  const [requestThreshold, setRequestThreshold] = useState(0.5);
+  const [thresholdBusy, setThresholdBusy] = useState(false);
+  const [thresholdMessage, setThresholdMessage] = useState(null);
   const timer = useRef(null);
 
   const load = useCallback(async () => {
@@ -88,15 +92,9 @@ export default function LookingForClient() {
   }, [profileId, data]);
 
   useEffect(() => {
-    if (!profileId) return;
-    const url = requestId
-      ? `/api/profiles/${profileId}/deferred?request_id=${requestId}`
-      : `/api/profiles/${profileId}/deferred`;
-    fetch(url, { cache: 'no-store' })
-      .then((r) => r.json())
-      .then((b) => setDeferred(b.deferred ?? []))
-      .catch(() => setDeferred([]));
-  }, [profileId, requestId]);
+    setProfileThreshold(request?.profile_threshold ?? 0.5);
+    setRequestThreshold(request?.request_threshold ?? 0.5);
+  }, [request?.request_id, request?.profile_threshold, request?.request_threshold]);
 
   useEffect(() => {
     if (!dirty || !draft.trim()) {
@@ -162,10 +160,69 @@ export default function LookingForClient() {
     }
   };
 
+  const saveThresholds = async () => {
+    if (!profileId || !requestId) return;
+    setThresholdBusy(true);
+    setThresholdMessage(null);
+    try {
+      const res = await fetch('/api/profiles/request/thresholds', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          profile_id: profileId,
+          request_id: requestId,
+          profile_threshold: profileThreshold,
+          request_threshold: requestThreshold,
+        }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || 'Could not save strictness');
+      setThresholdMessage({
+        tone: 'success',
+        text: 'Strictness saved. Lowering it re-checks Not sure yet ads on the next run.',
+      });
+      // Update the loaded request in place. Reloading the whole profile resets
+      // the selected request to the first one, which would hide the sliders
+      // the user just saved.
+      setData((prev) => ({
+        ...prev,
+        profiles: (prev?.profiles ?? []).map((entry) => (
+          entry.profile_id !== profileId
+            ? entry
+            : {
+                ...entry,
+                requests: (entry.requests ?? []).map((item) => (
+                  item.request_id !== requestId
+                    ? item
+                    : {
+                        ...item,
+                        profile_threshold: profileThreshold,
+                        request_threshold: requestThreshold,
+                      }
+                )),
+              }
+        )),
+      }));
+    } catch (error) {
+      setThresholdMessage({ tone: 'error', text: error.message });
+    } finally {
+      setThresholdBusy(false);
+    }
+  };
+
   if (!data) {
     return (
-      <PageShell eyebrow="Step 2 of 3" title="What you are looking for">
-        <p className="text-sm text-muted-foreground">Loading…</p>
+      <PageShell title="What you are looking for">
+        <div className="flex flex-col items-center justify-center gap-3 py-16">
+          {message?.tone === 'error' ? (
+            <p className="text-sm text-destructive">{message.text}</p>
+          ) : (
+            <>
+              <Spinner />
+              <p className="text-sm text-muted-foreground">Loading your requests…</p>
+            </>
+          )}
+        </div>
       </PageShell>
     );
   }
@@ -173,7 +230,6 @@ export default function LookingForClient() {
   if (profiles.length === 0) {
     return (
       <PageShell
-        eyebrow="Step 2 of 3"
         title="What you are looking for"
         description="Describe the role you want right now. This is temporary scoping inside your profile — it never changes who you are."
       >
@@ -190,12 +246,11 @@ export default function LookingForClient() {
 
   return (
     <PageShell
-      eyebrow="Step 2 of 3"
       title="What you are looking for"
       description="This is temporary scoping inside your profile, not a change of who you are. Ads that fit your profile but fall outside this request are held for later instead of being thrown away."
     >
       <div className="grid gap-6 lg:grid-cols-[20rem_1fr]">
-        <div className="space-y-6">
+        <div className="space-y-6 lg:sticky lg:top-28 lg:self-start">
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Profile</CardTitle>
@@ -208,10 +263,10 @@ export default function LookingForClient() {
                   type="button"
                   onClick={() => setProfileId(f.profile_id)}
                   className={cn(
-                    'w-full rounded-xl border p-3 text-left transition-colors',
+                    'w-full rounded-md border p-3 text-left transition-colors',
                     f.profile_id === profileId
-                      ? 'border-primary bg-primary/10'
-                      : 'border-border/60 hover:border-primary/40 hover:bg-accent/40'
+                      ? 'border-foreground/30 bg-secondary'
+                      : 'border-border/60 hover:border-foreground/20 hover:bg-accent/40'
                   )}
                 >
                   <span className="truncate text-sm font-semibold text-foreground">
@@ -241,10 +296,10 @@ export default function LookingForClient() {
                     setVerdict(null);
                   }}
                   className={cn(
-                    'w-full rounded-xl border p-3 text-left text-xs transition-colors',
+                    'w-full rounded-md border p-3 text-left text-xs transition-colors',
                     r.request_id === requestId
-                      ? 'border-primary bg-primary/10'
-                      : 'border-border/60 hover:border-primary/40 hover:bg-accent/40'
+                      ? 'border-foreground/30 bg-secondary'
+                      : 'border-border/60 hover:border-foreground/20 hover:bg-accent/40'
                   )}
                 >
                   <span className="line-clamp-2 text-foreground">
@@ -273,7 +328,7 @@ export default function LookingForClient() {
                 }}
                 rows={12}
                 placeholder="Must be remote. Backend or AI integration roles. Intermediate to senior."
-                className="w-full rounded-xl border border-input bg-background/60 p-4 text-sm leading-relaxed text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus:border-primary focus:ring-2 focus:ring-primary/30"
+                className="w-full rounded-md border border-input bg-background p-4 text-sm leading-relaxed text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus:border-ring focus:ring-1 focus:ring-ring"
               />
 
               <ChangeBanner verdict={verdict} busy={classifying} />
@@ -281,7 +336,7 @@ export default function LookingForClient() {
               {message && (
                 <div
                   className={cn(
-                    'rounded-xl border px-4 py-3 text-sm',
+                    'rounded-md border px-4 py-3 text-sm',
                     message.tone === 'error'
                       ? 'border-destructive/50 bg-destructive/10 text-destructive'
                       : message.tone === 'success'
@@ -309,36 +364,89 @@ export default function LookingForClient() {
 
           <Card>
             <CardHeader>
-              <CardTitle className="text-lg">Held for later ({deferred.length})</CardTitle>
+              <CardTitle className="text-lg">Judging strictness</CardTitle>
               <CardDescription>
-                {requestId
-                  ? 'Ads the previous request held back, eligible again under this one.'
-                  : 'Ads that fit your profile but that you did not ask for.'}
+                How confident the judge must be before an accepted ad becomes a lead.
+                This does not change what you are looking for.
               </CardDescription>
             </CardHeader>
-            <CardContent>
-              {deferred.length === 0 ? (
-                <p className="text-sm text-muted-foreground">Nothing held back.</p>
-              ) : (
-                <div className="space-y-2">
-                  {deferred.map((entry) => (
-                    <div key={entry.ad_archive_id} className="rounded-xl border border-border/60 px-3 py-2">
-                      <p className="text-sm font-medium text-foreground">
-                        {entry.ad?.advertiser_name || 'Unnamed advertiser'}
-                      </p>
-                      <p className="mt-0.5 text-xs text-muted-foreground">
-                        {entry.ad?.source_keyword || '—'}
-                        {entry.ad_category ? ` · ${entry.ad_category}` : ''}
-                      </p>
-                      {entry.reason && (
-                        <p className="mt-0.5 text-xs italic text-muted-foreground/80">{entry.reason}</p>
-                      )}
-                    </div>
-                  ))}
-                </div>
+            <CardContent className="space-y-5">
+              <label className="block space-y-2">
+                <span className="flex items-center justify-between text-sm font-medium text-foreground">
+                  <span>Profile judge</span>
+                  <span className="tabular-nums text-muted-foreground">
+                    {Math.round(profileThreshold * 100)}%
+                  </span>
+                </span>
+                <input
+                  type="range"
+                  min="0.5"
+                  max="0.9"
+                  step="0.05"
+                  value={profileThreshold}
+                  disabled={!request}
+                  onChange={(event) => setProfileThreshold(Number(event.target.value))}
+                  className="w-full accent-[hsl(var(--primary))]"
+                />
+                <span className="block text-xs leading-relaxed text-muted-foreground">
+                  Higher means fewer “this fits my profile” ads are accepted. Rejections are
+                  never affected.
+                </span>
+              </label>
+
+              <label className="block space-y-2">
+                <span className="flex items-center justify-between text-sm font-medium text-foreground">
+                  <span>Request judge</span>
+                  <span className="tabular-nums text-muted-foreground">
+                    {Math.round(requestThreshold * 100)}%
+                  </span>
+                </span>
+                <input
+                  type="range"
+                  min="0.5"
+                  max="0.9"
+                  step="0.05"
+                  value={requestThreshold}
+                  disabled={!request}
+                  onChange={(event) => setRequestThreshold(Number(event.target.value))}
+                  className="w-full accent-[hsl(var(--primary))]"
+                />
+                <span className="block text-xs leading-relaxed text-muted-foreground">
+                  Higher means an ad must match your current request more confidently.
+                  Anything uncertain goes to Not sure yet, not the bin.
+                </span>
+              </label>
+
+              <p className="rounded-md border border-border/60 bg-muted/40 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+                Lowering a threshold re-checks Not sure yet ads on the next run. Raising it
+                only affects future judgments — it never removes an existing lead.
+              </p>
+
+              {thresholdMessage && (
+                <p
+                  className={cn(
+                    'text-xs',
+                    thresholdMessage.tone === 'error' ? 'text-destructive' : 'text-success'
+                  )}
+                >
+                  {thresholdMessage.text}
+                </p>
               )}
+
+              <Button
+                onClick={saveThresholds}
+                loading={thresholdBusy}
+                disabled={
+                  !request ||
+                  (profileThreshold === (request.profile_threshold ?? 0.5) &&
+                    requestThreshold === (request.request_threshold ?? 0.5))
+                }
+              >
+                Save strictness
+              </Button>
             </CardContent>
           </Card>
+
         </div>
       </div>
     </PageShell>

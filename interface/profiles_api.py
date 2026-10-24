@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from modules.profiles import deferred as deferred_store
+from modules.profiles import held as held_store
 from modules.profiles import store
 from modules.profiles.classifier import (
     classify_profile_change,
@@ -63,6 +64,13 @@ class ActivateRequest(BaseModel):
     request_id: str | None = None
 
 
+class ThresholdsRequest(BaseModel):
+    profile_id: str
+    request_id: str
+    profile_threshold: float = Field(default=0.5, ge=0.5, le=0.9)
+    request_threshold: float = Field(default=0.5, ge=0.5, le=0.9)
+
+
 # ── helpers ─────────────────────────────────────────────────────────────────
 def _active_request_text(profile_id: str) -> str:
     requests = store.list_requests(profile_id)
@@ -86,12 +94,15 @@ def _summary(profile: store.Profile) -> dict:
         "counts": {
             "rejected": len(rejected_ids(profile.profile_id)),
             "deferred_stored": len(deferred_store.deferred_ids(profile.profile_id)),
+            "held_stored": len(held_store.load(profile.profile_id)),
             "leads": len(store.load_leads(profile.profile_id)),
         },
         "requests": [
             {
                 "request_id": r.request_id,
                 "request_text": r.request_text,
+                "profile_threshold": r.profile_threshold,
+                "request_threshold": r.request_threshold,
             }
             for r in store.list_requests(profile.profile_id)
         ],
@@ -141,6 +152,25 @@ async def get_deferred(profile_id: str, request_id: str | None = None):
     return {"profile_id": profile_id, "deferred": records}
 
 
+@router.get("/{profile_id}/held")
+async def get_held(profile_id: str, request_id: str | None = None):
+    """
+    Accepted ads below the strictness threshold.
+
+    With `request_id`, returns profile-stage holds (which apply to every
+    request) plus request-stage holds for that request. Without it, returns
+    every hold the profile has.
+    """
+    if store.get_profile(profile_id) is None:
+        raise HTTPException(404, "Profile not found")
+    records = (
+        held_store.for_lens(profile_id, request_id)
+        if request_id
+        else held_store.load(profile_id)
+    )
+    return {"profile_id": profile_id, "held": records}
+
+
 @router.post("/activate")
 async def activate(payload: ActivateRequest):
     from modules.profiles.active import read_active, set_active
@@ -170,6 +200,46 @@ def request_text_of(request_id: str | None) -> str:
         return ""
     existing = store.get_request(request_id)
     return existing.request_text if existing else ""
+
+
+def thresholds_of(request_id: str | None) -> tuple[float, float]:
+    if not request_id:
+        return 0.5, 0.5
+    existing = store.get_request(request_id)
+    return (
+        existing.profile_threshold if existing else 0.5,
+        existing.request_threshold if existing else 0.5,
+    )
+
+
+@router.post("/request/thresholds")
+async def save_thresholds(payload: ThresholdsRequest):
+    """
+    Save how strict the two judges must be for this request.
+
+    The values ride with the request (the lens). A run snapshots them into its
+    file, so changing them later cannot rewrite history. Raising a threshold
+    never demotes an existing lead; lowering one re-gates held ads on the next
+    run.
+    """
+    existing = store.get_request(payload.request_id)
+    if existing is None or existing.profile_id != payload.profile_id:
+        raise HTTPException(404, "Request not found for this profile")
+    existing.profile_threshold = payload.profile_threshold
+    existing.request_threshold = payload.request_threshold
+    store.save_request(existing)
+    logger.info(
+        "🎚️ Strictness for %s: profile %.2f, request %.2f",
+        existing.request_id, existing.profile_threshold, existing.request_threshold,
+    )
+    return {
+        "status": "saved",
+        "request": existing.model_dump(mode="json"),
+        "note": (
+            "Lowering a threshold re-checks held ads on the next run. "
+            "Raising one only affects future judgments."
+        ),
+    }
 
 
 # ── profile: classify, then apply ───────────────────────────────────────────
@@ -236,8 +306,11 @@ async def apply_profile(payload: ApplyProfileRequest):
         )
         # A profile with no request would leave the request file blank, so give
         # it one from whatever the user currently has.
+        carried_profile_t, carried_request_t = thresholds_of(current.get("request_id"))
         request_obj = store.create_request(
-            created.profile_id, request_text_of(current.get("request_id"))
+            created.profile_id, request_text_of(current.get("request_id")),
+            profile_threshold=carried_profile_t,
+            request_threshold=carried_request_t,
         )
         set_active(created.profile_id, request_obj.request_id)
         logger.info("🌱 New profile %s created (about=%r)", created.profile_id, created.about)
@@ -258,8 +331,13 @@ async def apply_profile(payload: ApplyProfileRequest):
     created = store.create_profile(
         about=verdict.about or profile.about, profile_text=text
     )
+    carried_profile_t, carried_request_t = thresholds_of(
+        current.get("request_id")
+    )
     request_obj = store.create_request(
-        created.profile_id, _active_request_text(profile.profile_id)
+        created.profile_id, _active_request_text(profile.profile_id),
+        profile_threshold=carried_profile_t,
+        request_threshold=carried_request_t,
     )
     set_active(created.profile_id, request_obj.request_id)
     logger.info(
@@ -310,7 +388,14 @@ async def apply_request(payload: ApplyRequestRequest):
     )
 
     if existing is None:
-        created = store.create_request(payload.profile_id, text)
+        carried_profile_t, carried_request_t = thresholds_of(
+            (read_active() or {}).get("request_id")
+        )
+        created = store.create_request(
+            payload.profile_id, text,
+            profile_threshold=carried_profile_t,
+            request_threshold=carried_request_t,
+        )
         return {"status": "created", "saved": True, "request": created.model_dump(mode="json")}
 
     verdict = await classify_request_change(existing.request_text, text)
@@ -320,7 +405,11 @@ async def apply_request(payload: ApplyRequestRequest):
         return {"status": "updated", "saved": True,
                 "request": existing.model_dump(mode="json"), "change": verdict.change}
 
-    created = store.create_request(payload.profile_id, text)
+    created = store.create_request(
+        payload.profile_id, text,
+        profile_threshold=existing.profile_threshold,
+        request_threshold=existing.request_threshold,
+    )
     set_active(payload.profile_id, created.request_id)
     logger.info(
         "🎯 Request %s: new request %s — %s",

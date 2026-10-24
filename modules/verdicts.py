@@ -226,16 +226,28 @@ class FilterIndex:
     own rejections, then what this request parked.
     """
 
-    def __init__(self, category: str, profile_id: str | None, request_id: str | None = None):
+    def __init__(
+        self,
+        category: str,
+        profile_id: str | None,
+        request_id: str | None = None,
+        profile_threshold: float = 0.5,
+        request_threshold: float = 0.5,
+    ):
         self.category = category
         self.profile_id = profile_id
         self.request_id = request_id
+        self.profile_threshold = profile_threshold
+        self.request_threshold = request_threshold
         self._accepted = accepted_ids(category)
         self._junk = junk_ids(category)
         self._rejected = rejected_ids(profile_id) if profile_id else set()
         # Deferred is owned by modules.profiles.deferred during the transition;
         # imported lazily so this module stays usable without it.
         self._deferred: dict[str, str] = {}
+        self._held_profile: dict[str, float] = {}
+        self._held_request: dict[str, float] = {}
+        self._load_held()
         if profile_id and request_id:
             try:
                 from modules.profiles.deferred import load as _load_deferred
@@ -248,13 +260,38 @@ class FilterIndex:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("⚠️ deferred bucket unavailable (%s)", exc)
 
+    def _load_held(self) -> None:
+        self._held_profile = {}
+        self._held_request = {}
+        if not self.profile_id:
+            return
+        try:
+            from modules.profiles import held as _held
+
+            for record in _held.load(self.profile_id):
+                ad_id = record.get("ad_archive_id")
+                if not ad_id:
+                    continue
+                threshold = float(record.get("held_threshold") or 0.5)
+                if record.get("stage") == "profile":
+                    self._held_profile[ad_id] = threshold
+                elif record.get("stage") == "request" \
+                        and self.request_id \
+                        and record.get("request_id") == self.request_id:
+                    self._held_request[ad_id] = threshold
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("⚠️ held bucket unavailable (%s)", exc)
+
     def load(self) -> "FilterIndex":
         self._accepted = accepted_ids(self.category)
         self._junk = junk_ids(self.category)
         self._rejected = rejected_ids(self.profile_id) if self.profile_id else set()
+        self._load_held()
         logger.info(
-            "🧠 Filter index: %d accepted · %d junk · %d rejected for this profile · %d deferred",
-            len(self._accepted), len(self._junk), len(self._rejected), len(self._deferred),
+            "🧠 Filter index: %d accepted · %d junk · %d rejected for this profile · "
+            "%d held · %d deferred",
+            len(self._accepted), len(self._junk), len(self._rejected),
+            len(self._held_profile) + len(self._held_request), len(self._deferred),
         )
         return self
 
@@ -273,9 +310,9 @@ class FilterIndex:
         """
         Should this card be skipped? Returns (skip?, reason).
 
-        Deferred is the only outcome that can come BACK: the same ad under the
-        same request stays parked, but a different request gets to judge it
-        again. Everything else is final.
+        Deferred and held are the outcomes that can come BACK. Deferred stays
+        parked under the same request; held stays parked until the threshold
+        drops below the one it missed.
         """
         if ad_id in self._accepted:
             return True, "accepted"
@@ -283,6 +320,16 @@ class FilterIndex:
             return True, "junk"
         if ad_id in self._rejected:
             return True, "rejected"
+        held_profile = self._held_profile.get(ad_id)
+        if held_profile is not None:
+            if self.profile_threshold >= held_profile:
+                return True, "held_profile"
+            return False, "held_below_threshold"
+        held_request = self._held_request.get(ad_id)
+        if held_request is not None:
+            if self.request_threshold >= held_request:
+                return True, "held_request"
+            return False, "held_below_threshold"
         deferred_by = self._deferred.get(ad_id)
         if deferred_by is not None:
             if self.request_id and deferred_by == self.request_id:
@@ -309,5 +356,6 @@ class FilterIndex:
             "accepted": len(self._accepted),
             "junk": len(self._junk),
             "rejected": len(self._rejected),
+            "held": len(self._held_profile) + len(self._held_request),
             "deferred": len(self._deferred),
         }

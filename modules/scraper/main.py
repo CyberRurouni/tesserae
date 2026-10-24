@@ -247,6 +247,8 @@ async def run_scrape(
     on_harvested=None,
     should_stop=None,
     on_step=None,
+    profile_threshold: float = 0.5,
+    request_threshold: float = 0.5,
 ) -> list[AdRecord]:
     """
     Full scrape pass: for each keyword, search the library, extract ads,
@@ -285,7 +287,9 @@ async def run_scrape(
     # In-memory mirror of this profile's verdicts (plus its ancestors'), loaded
     # once instead of one Redis round trip per scraped card. With no profile the
     # mirror is empty, which degrades to within-pass dedup only.
-    filter_index = get_filter_index(cat_id, profile_id, request_id).load()
+    filter_index = get_filter_index(
+        cat_id, profile_id, request_id, profile_threshold, request_threshold,
+    ).load()
     if profile_id is None:
         logger.warning("⚠️ No profile for this run — only global dedup is active")
 

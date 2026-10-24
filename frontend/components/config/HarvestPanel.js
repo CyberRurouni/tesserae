@@ -131,12 +131,12 @@ export default function HarvestPanel({ limit, onLimitChange, keywords, onKeyword
             <CardTitle>Harvest</CardTitle>
             <CardDescription>
               {inactive
-                ? 'Not active yet. Once Tesserae decides this profile’s skills are fully covered, this search re-searches your best keywords for ads posted since instead of generating new ones.'
+                ? 'Not active yet. Once Tesserae decides your skills are fully covered, a search re-searches your best keywords for new ads instead of generating new ones.'
                 : 'Active. This run re-searches keywords you already used, to catch ads posted since. Choose how many of your best, or pick specific ones.'}
             </CardDescription>
           </div>
           {data?.harvest_active && (
-            <Badge variant="info">Active · {data.searchable} available</Badge>
+            <Badge variant="info">Active, {data.searchable} available</Badge>
           )}
         </div>
       </CardHeader>
@@ -158,7 +158,7 @@ export default function HarvestPanel({ limit, onLimitChange, keywords, onKeyword
                 className={cn(
                   'h-9 rounded-lg border px-3 text-sm font-medium transition-colors',
                   !explicit && limit === n
-                    ? 'border-primary bg-primary/10 text-primary'
+                    ? 'border-foreground/30 bg-secondary text-foreground'
                     : 'border-border text-muted-foreground hover:bg-accent/40 hover:text-foreground'
                 )}
               >
@@ -189,17 +189,17 @@ export default function HarvestPanel({ limit, onLimitChange, keywords, onKeyword
         </div>
 
         {/* The resolved set — what will actually be searched */}
-        <div className="rounded-xl border border-border/60 bg-muted/30 px-4 py-3">
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        <div className="rounded-md border border-border/60 bg-muted/30 px-4 py-3">
+          <p className="text-xs font-medium text-muted-foreground">
             This run will re-search {preview.length} keyword{preview.length === 1 ? '' : 's'}
           </p>
           <p className="mt-1 text-sm text-foreground">
-            {preview.length ? preview.join(' · ') : 'None — nothing selected.'}
+            {preview.length ? preview.join(', ') : 'None — nothing selected.'}
           </p>
           {data?.notes?.length > 0 && (
             <ul className="mt-2 space-y-1 text-xs text-muted-foreground">
               {data.notes.map((n) => (
-                <li key={n}>· {n}</li>
+                <li key={n}>{n}</li>
               ))}
             </ul>
           )}
@@ -222,7 +222,7 @@ export default function HarvestPanel({ limit, onLimitChange, keywords, onKeyword
                 {explicit ? 'Back to ranking' : `Pick the top ${limit || 20}`}
               </button>
             </div>
-            <ul className="max-h-72 divide-y divide-border overflow-y-auto rounded-xl border border-border/60">
+            <ul className="max-h-72 divide-y divide-border overflow-y-auto rounded-md border border-border/60">
               {items.map((item) => {
                 const checked = selectedSet.has(item.keyword);
                 return (
