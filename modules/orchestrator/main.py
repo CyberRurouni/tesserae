@@ -41,8 +41,8 @@ from core import (
     UserProfile,
 )
 
-from modules.judging import judge_ad_relevance
-from modules.judging.relevance import judge_request_relevance
+from modules.judge import judge_ad_relevance
+from modules.judge.judge import judge_request_relevance
 from modules.profiles import held as held_store
 from modules.scraper import browser_session, run_scrape
 from modules.scraper.seen import RunSeenIds

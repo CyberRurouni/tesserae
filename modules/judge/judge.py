@@ -1,5 +1,5 @@
 """
-relevance.py — relevance judge: is this ad actually what the user wants?
+judge.py — relevance judge: is this ad actually what the user wants?
 
 Two judges, deliberately separate:
 

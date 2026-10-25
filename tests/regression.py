@@ -180,7 +180,7 @@ def test_filter():
 # ── 4. the judge ────────────────────────────────────────────────────────────
 def test_judge():
     print("\n[9] the three-stage judge")
-    import modules.judging.relevance as rel
+    import modules.judge.judge as rel
 
     class Stub:
         payload = {}
@@ -1776,7 +1776,7 @@ def test_idle_run_is_stopped():
 
     import interface.main as api
     import modules.orchestrator.main as om
-    from modules.judging import relevance as R
+    from modules.judge import judge as R
 
     # ── judging reports in ───────────────────────────────────────────────────
     src = inspect.getsource(R.judge_ad_relevance)
@@ -2422,7 +2422,7 @@ def test_run_page_review_controls():
 
 def test_split_judge_and_held():
     print("\n[9b] profile and request judges are separate, and confidence holds")
-    import modules.judging.relevance as rel
+    import modules.judge.judge as rel
     from modules.profiles import held as held_store
     from modules.profiles import store as profile_store
     from modules.storage import resolve_lens_state

@@ -79,7 +79,7 @@ python3 -m interface.orchestrate --run-mode generate --cycles 3
 
 ```
 core/          Pydantic schemas shared across the system
-modules/       scraper, judging, storage, orchestrator, collection
+modules/       scraper, judge, storage, orchestrator, collection
 interface/     FastAPI app + CLI entry points
 frontend/      Next.js dashboard
 genesis/       First-run bootstrap
