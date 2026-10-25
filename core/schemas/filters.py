@@ -12,6 +12,9 @@ from pydantic import BaseModel, Field
 
 from .category import DEFAULT_CATEGORY_ID
 
+# Default ceiling on unique ads extracted for one keyword in a single crawl.
+DEFAULT_MAX_ADS_PER_KEYWORD = 1400
+
 
 class DeliveryStatus(str, Enum):
     all = "all"
@@ -72,6 +75,12 @@ class ScrapingFilters(BaseModel):
 
     # --- Tesserae extras (not offered by the Meta UI) ---
     ad_age_hours: int | None = None        # e.g. 168 = less than a week old
+
+    # Hard ceiling on unique ads extracted for ONE keyword in a single crawl.
+    # This is separate from the Meta estimate: the estimate only decides when
+    # the crawl starts confirming the tail, while this actually stops a keyword
+    # that has enough. 0 disables the cap.
+    max_ads_per_keyword: int = Field(default=DEFAULT_MAX_ADS_PER_KEYWORD, ge=0)
 
     # Heuristic backbone: ad text must contain every required pattern (AND),
     # at least one of the any-patterns (OR), and must NOT contain any excluded

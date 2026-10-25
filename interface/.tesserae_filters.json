@@ -10,7 +10,9 @@
     "threads"
   ],
   "media_type": "all",
-  "keywords": [],
+  "keywords": [
+    "rust developer"
+  ],
   "ad_age_hours": "720",
   "delivered_to_regions": [
     "ALL"
@@ -28,11 +30,11 @@
   "custom_start_date": "",
   "custom_end_date": "",
   "regions": "ALL",
-  "run_mode": "generate",
-  "cycles": 1,
+  "run_mode": "existing",
+  "cycles": 3,
   "run_until_complete": false,
   "parallel_workers": 3,
-  "harvest_limit": 20,
+  "harvest_limit": 10,
   "harvest_keywords": null,
   "profile_id": "fam_ai-systems-architect_301c03",
   "request_id": "req_ai-systems-architect_301c03_20bdae",

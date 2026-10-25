@@ -45,7 +45,7 @@ class KeywordStats(BaseModel):
     category: str | None = None
     runs_searched: int = 0
     ads_fetched: int = 0        # survived the heuristic filters
-    relevant_ads: int = 0       # survived the AI relevance checkpoint
+    relevant_ads: int = 0       # survived the AI relevance judge
     last_relevant_hit_at: datetime | None = None
     status_hint: KeywordStatus = KeywordStatus.new
     # When this keyword may be searched again — Actor 2's cooldown decision,

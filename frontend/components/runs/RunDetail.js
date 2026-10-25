@@ -837,6 +837,9 @@ export function RunDetail({ runId }) {
               {run.parallel_workers} keywords at a time — {run.parallel_workers} tabs
             </span>
           )}
+          {run.max_ads_per_keyword > 0 && (
+            <span>{Number(run.max_ads_per_keyword).toLocaleString()} ads per keyword max</span>
+          )}
           {run.run_mode && <span>Mode: {run.run_mode === 'generate' ? 'AI keywords' : 'your keywords only'}</span>}
         </div>
       )}

@@ -36,6 +36,7 @@ const KEEP = [
   'run_until_complete',
   'ad_age',
   'parallel_workers',
+  'max_ads_per_keyword',
   'harvest_limit',
   'harvest_keywords',
 ];

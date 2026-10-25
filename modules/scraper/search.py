@@ -17,7 +17,7 @@ Fallback UI flow, per the Meta UI reference doc:
            category" (misleadingly) — it is the keyword/advertiser search.
 
 Pure browser mechanics — no extraction (extract.py), no judgement
-(checkpoints city).
+(judging city).
 """
 
 import asyncio

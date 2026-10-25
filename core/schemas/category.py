@@ -2,9 +2,9 @@
 Category — the lens the whole pipeline looks through.
 
 One category bundles the three things the pipeline parametrizes:
-  - description   -> the intent sentence for checkpoint (a) — and, with
+  - description   -> the intent sentence for the relevance judge — and, with
                      the About-you section later, the seed for
-                     checkpoint (b) keyword generation
+                     keyword generation
   - heuristics    -> the cheap first sieve's tick/cross patterns,
                      per category
   - id            -> scopes Redis verdict keys (tesserae:seen_ad:<id>:<ad>)

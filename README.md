@@ -3,7 +3,7 @@
 AI-driven prospecting automation for the Meta Ad Library.
 
 Tesserae searches the Meta Ad Library for ads matching your profile, then uses AI
-checkpoints to judge which ads are actually relevant to you — so you get a short
+judges to decide which ads are actually relevant to you — so you get a short
 list of real advertisers hiring for your stack instead of thousands of raw rows.
 
 ## How it works
@@ -71,7 +71,7 @@ python3 -m interface.orchestrate --run-mode generate --cycles 3
 
 | Variable | Purpose |
 | --- | --- |
-| `GEMINI_API_KEY` | Powers the AI checkpoints. **Required.** |
+| `GEMINI_API_KEY` | Powers the AI judges. **Required.** |
 | `GEMINI_MODEL` | Model override. |
 | `REDIS_HOST` / `REDIS_PORT` | Redis location. |
 
@@ -79,7 +79,7 @@ python3 -m interface.orchestrate --run-mode generate --cycles 3
 
 ```
 core/          Pydantic schemas shared across the system
-modules/       scraper, checkpoints, storage, orchestrator, collection
+modules/       scraper, judging, storage, orchestrator, collection
 interface/     FastAPI app + CLI entry points
 frontend/      Next.js dashboard
 genesis/       First-run bootstrap

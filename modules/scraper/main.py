@@ -468,6 +468,10 @@ async def _scrape_keyword(
 
     estimate = await read_results_estimate(page)
     target_unique = int(estimate * TARGET_UNIQUE_RATIO) if estimate else None
+    # A real ceiling, unlike the estimate-derived target above. The target only
+    # changes the dead-scroll budget; this stops the keyword once it has enough
+    # unique ads. 0 means the user asked for no ceiling.
+    cap = int(getattr(filters, "max_ads_per_keyword", 0) or 0)
     quiet_budget = QUIET_STEPS_BEFORE_TARGET  # shortened once we get there
     quiet_steps = 0
     steps = 0
@@ -493,10 +497,10 @@ async def _scrape_keyword(
     stuck_reloads = 0
 
     logger.info(
-        "%s🎯 Crawl plan: Meta says ~%s results, target %s cards seen, exit after %d dead scroll(s), "
-        "fixed %dpx steps, waiting for Meta's lazy loads rather than racing them",
-        tag, estimate if estimate is not None else "?", target_unique, quiet_budget,
-        SCROLL_DISTANCE_PX,
+        "%s🎯 Crawl plan: Meta says ~%s results, target %s cards seen, per-keyword cap %s, "
+        "exit after %d dead scroll(s), fixed %dpx steps, waiting for Meta's lazy loads rather than racing them",
+        tag, estimate if estimate is not None else "?", target_unique,
+        cap or "none", quiet_budget, SCROLL_DISTANCE_PX,
     )
 
     while True:
@@ -549,6 +553,18 @@ async def _scrape_keyword(
                 # Empty when a callback took the group; the ads themselves when
                 # there is none, so callers that want them back get them.
                 fresh.extend(await _flush_judge())
+
+        # A real cap, unlike the estimate-derived target below. Break rather
+        # than raise or set the run-wide stop flag: only THIS keyword has had
+        # enough, so the next keyword must still be searched. The ads already
+        # collected are drained and judged on the way out like any other exit.
+        if cap and len(keyword_ads) >= cap:
+            logger.info(
+                "%s🛑 %r: reached the per-keyword cap (%d unique ads, limit %d) — "
+                "stopping this keyword; its ads will be judged and saved",
+                tag, keyword, len(keyword_ads), cap,
+            )
+            break
 
         # Hitting the target does not end the crawl. It only buys the shorter
         # dead-end budget, so the page gets to confirm the bottom.

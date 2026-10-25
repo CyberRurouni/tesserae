@@ -27,9 +27,10 @@ from typing import Any, Optional, Union
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from genesis.config import ADS_DIR
+from core.schemas.filters import DEFAULT_MAX_ADS_PER_KEYWORD
 
 from interface import log_buffer
 from interface.profiles_api import router as profiles_router
@@ -180,6 +181,8 @@ class RunRequest(BaseModel):
     # Keywords crawled at once. 1 keeps the original sequential behaviour;
     # raise it for speed at the cost of captcha exposure.
     parallel_workers: int = 1
+    # Stop a keyword once it has extracted this many unique ads. 0 = unlimited.
+    max_ads_per_keyword: int = Field(default=DEFAULT_MAX_ADS_PER_KEYWORD, ge=0)
     # Harvest (all-covered mode): how many of the pool's best keywords to
     # re-search, or an explicit list that overrides the number. None leaves the
     # decision to the backend's ranking.
@@ -327,6 +330,7 @@ def _build_filters(request: RunRequest):
         regions=regions,
         languages=languages,
         sort_order=request.sort_order,
+        max_ads_per_keyword=request.max_ads_per_keyword,
         heuristic_patterns=heuristics,
     )
 
@@ -420,6 +424,7 @@ async def run_orchestrator_background(run_id: str, request: RunRequest) -> None:
         # none of your keywords searched — and the run state was the only place
         # that could have said why.
         state["parallel_workers"] = max(1, min(int(request.parallel_workers or 1), 3))
+        state["max_ads_per_keyword"] = filters.max_ads_per_keyword
         state["run_mode"] = request.run_mode
         state["profile_is_active"] = request.profile_id == (
             read_active() or {}

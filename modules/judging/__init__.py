@@ -1,5 +1,5 @@
 """
-Checkpoints city — the three gates of judgement.
+Judging city — the gates that decide what survives.
 
 The ONLY place in Tesserae where AI touches the pipeline. The scraper city
 gathers raw material with zero judgement; these gates decide what survives:

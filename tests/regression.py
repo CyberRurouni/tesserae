@@ -180,7 +180,7 @@ def test_filter():
 # ── 4. the judge ────────────────────────────────────────────────────────────
 def test_judge():
     print("\n[9] the three-stage judge")
-    import modules.checkpoints.relevance as rel
+    import modules.judging.relevance as rel
 
     class Stub:
         payload = {}
@@ -1325,6 +1325,143 @@ def test_cancellation():
     path.unlink(missing_ok=True)
 
 
+def test_keyword_cap():
+    """
+    A keyword cap is a real ceiling, not the Meta-estimate target.
+
+    The estimate target only changes the dead-scroll budget. This one must stop
+    the keyword and let the next keyword run, while keeping every ad already
+    extracted so it can be judged and saved.
+    """
+    print("\n[23b] a keyword cap stops only that keyword")
+    import interface.main as api
+    import interface.select_filters as sf
+    import modules.scraper.main as sm
+
+    check("the default cap is 1,400",
+          ScrapingFilters(category="career_jobs").max_ads_per_keyword == 1400)
+    check("zero means no cap",
+          ScrapingFilters(category="career_jobs",
+                          max_ads_per_keyword=0).max_ads_per_keyword == 0)
+    check("the API request accepts the same setting",
+          api.RunRequest(category="career_jobs").max_ads_per_keyword == 1400)
+
+    # Do not let this test rewrite the user's real last-selection file.
+    saved_selection = sf._save_last_selection
+    sf._save_last_selection = lambda *a, **k: None
+    try:
+        default_filters = api._build_filters(api.RunRequest(
+            category="career_jobs", keywords=["alpha"], run_mode="existing"))
+        zero_filters = api._build_filters(api.RunRequest(
+            category="career_jobs", keywords=["alpha"], run_mode="existing",
+            max_ads_per_keyword=0))
+    finally:
+        sf._save_last_selection = saved_selection
+    check("the default reaches ScrapingFilters",
+          default_filters.max_ads_per_keyword == 1400)
+    check("and an explicit zero is not replaced by the default",
+          zero_filters.max_ads_per_keyword == 0)
+
+    # ── the crawl actually stops at the cap, and the next keyword still runs ──
+    calls: list[str] = []
+    cursors: dict[str, int] = {}
+
+    class FakePage:
+        async def close(self):
+            return None
+
+    class FakeContext:
+        async def new_page(self):
+            return FakePage()
+
+    async def search(page, keyword, filters, dismiss_cookies=False):
+        calls.append(keyword)
+        cursors[keyword] = 0
+
+    async def apply(page, filters):
+        return None
+
+    async def empty(page):
+        return False
+
+    async def estimate(page):
+        return 60
+
+    async def extract(page, source_keyword=None, seen_ids=None,
+                      seen_fingerprints=None, encountered=None):
+        start = cursors[source_keyword]
+        window = [f"{source_keyword}-{i}" for i in range(start, min(start + 8, 60))]
+        cursors[source_keyword] = start + 8
+        out = []
+        for ad_id in window:
+            if encountered is not None:
+                encountered.add(ad_id)
+            if ad_id in seen_ids:
+                continue
+            seen_ids.add(ad_id)
+            out.append(AdRecord(ad_archive_id=ad_id, source_keyword=source_keyword,
+                                ad_text="We are hiring"))
+        return out
+
+    async def scroll(page, distance=1800, baseline=None, ceiling_ms=1500):
+        return {"waited_ms": 10, "grew": True, "count": baseline, "moved": True}
+
+    async def bottom(page):
+        return {"spinner": False, "see_more": False, "atBottom": True,
+                "ads": 0, "ready": True}
+
+    async def dump(page, tag):
+        return None
+
+    saved = {n: getattr(sm, n) for n in
+             ("search_keyword", "apply_filters", "empty_results",
+              "read_results_estimate", "extract_ads_from_page", "scroll_step",
+              "more_coming", "collect_page_html")}
+    sm.search_keyword, sm.apply_filters = search, apply
+    sm.empty_results, sm.read_results_estimate = empty, estimate
+    sm.extract_ads_from_page, sm.scroll_step = extract, scroll
+    sm.more_coming, sm.collect_page_html = bottom, dump
+    try:
+        got = asyncio.run(sm._scrape_on(
+            FakeContext(),
+            ScrapingFilters(category="career_jobs",
+                            keywords=["alpha", "beta"], max_ads_per_keyword=20),
+            None, "career_jobs", RunSeenIds(),
+        ))
+    finally:
+        for n, f in saved.items():
+            setattr(sm, n, f)
+
+    counts: dict[str, int] = {}
+    for record in got:
+        counts[record.source_keyword] = counts.get(record.source_keyword, 0) + 1
+    check("both keywords were searched, not just the first",
+          calls == ["alpha", "beta"], str(calls))
+    check("each keyword stopped at the cap instead of crawling all 60 cards",
+          counts == {"alpha": 24, "beta": 24},
+          f"{counts} (three batches of 8, then the cap breaks)")
+    check("the ads extracted before the cap are kept for judging",
+          len(got) == 48, f"{len(got)} ads")
+
+    # ── the setting is visible in the UI and survives a draft ────────────────
+    fe = Path(__file__).resolve().parents[1] / "frontend"
+    builder = (fe / "components" / "config" / "FilterBuilder.js").read_text()
+    draft = (fe / "lib" / "draft.js").read_text()
+    client = (fe / "app" / "config" / "ConfigClient.js").read_text()
+    detail = (fe / "components" / "runs" / "RunDetail.js").read_text()
+    route = (fe / "app" / "api" / "runs" / "[id]" / "route.js").read_text()
+    check("the Search page has a per-keyword cap input",
+          'id="max_ads_per_keyword"' in builder
+          and "max_ads_per_keyword: 1400" in builder)
+    check("the draft keeps the cap",
+          "'max_ads_per_keyword'" in draft)
+    check("the start request normalises blank/0 to unlimited",
+          "max_ads_per_keyword: Math.max(0, Math.floor(Number(filters.max_ads_per_keyword) || 0))"
+          in client)
+    check("the run page can report the cap it used",
+          "ads per keyword max" in detail and "max_ads_per_keyword" in route)
+
+
 def test_bulk_reader():
     """
     The reader used to walk the page one card at a time — one call to the
@@ -1639,7 +1776,7 @@ def test_idle_run_is_stopped():
 
     import interface.main as api
     import modules.orchestrator.main as om
-    from modules.checkpoints import relevance as R
+    from modules.judging import relevance as R
 
     # ── judging reports in ───────────────────────────────────────────────────
     src = inspect.getsource(R.judge_ad_relevance)
@@ -2285,7 +2422,7 @@ def test_run_page_review_controls():
 
 def test_split_judge_and_held():
     print("\n[9b] profile and request judges are separate, and confidence holds")
-    import modules.checkpoints.relevance as rel
+    import modules.judging.relevance as rel
     from modules.profiles import held as held_store
     from modules.profiles import store as profile_store
     from modules.storage import resolve_lens_state
@@ -2637,6 +2774,7 @@ def main():
     test_keyword_lifetime()
     test_single_lens()
     test_cancellation()
+    test_keyword_cap()
     test_bulk_reader()
     test_patience()
     test_idle_run_is_stopped()

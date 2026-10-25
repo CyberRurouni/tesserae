@@ -32,6 +32,7 @@ from core import (
     MediaType,
     SortOrder,
 )
+from core.schemas.filters import DEFAULT_MAX_ADS_PER_KEYWORD
 
 logger = logging.getLogger(__name__)
 
@@ -644,8 +645,17 @@ def build_scraping_filters(
     if ad_age_hours is None and not non_interactive:
         ad_age_hours = _select_ad_age_hours()
 
-    # ──── Results limit — removed per user request, default only ────
-    # (Kept at model default of 50, no prompt)
+    # ──── Per-keyword cap ────
+    # None means the model default; an explicit blank/0 means unlimited. This
+    # is a UI/API setting, so the CLI keeps the default rather than prompting.
+    raw_cap = kwargs.get("max_ads_per_keyword")
+    if raw_cap is None:
+        max_ads_per_keyword = DEFAULT_MAX_ADS_PER_KEYWORD
+    else:
+        try:
+            max_ads_per_keyword = max(0, int(raw_cap or 0))
+        except (TypeError, ValueError):
+            max_ads_per_keyword = DEFAULT_MAX_ADS_PER_KEYWORD
 
 # ──── Regions ────
     regions_arg = kwargs.get("regions")
@@ -704,6 +714,7 @@ def build_scraping_filters(
         languages=languages,
         sort_order=sort_order,
         ad_age_hours=ad_age_hours,
+        max_ads_per_keyword=max_ads_per_keyword,
     )
 
     # Apply heuristic patterns if provided
@@ -722,6 +733,7 @@ def build_scraping_filters(
         "media_type": media_type,
         "keywords": keywords,
         "ad_age_hours": ad_age_hours,
+        "max_ads_per_keyword": max_ads_per_keyword,
         "delivered_to_regions": delivered_regions,
         "languages": languages,
         "sort_order": sort_order,
@@ -804,6 +816,7 @@ def main(argv: list | None = None) -> None:
     print(f"  Media type:      {filters.media_type}")
     print(f"  Date range:      {filters.custom_start_date or 'any'} .. {filters.custom_end_date or 'today'}")
     print(f"  Ad age hours:    {filters.ad_age_hours or 'none'}")
+    print(f"  Ads/keyword:     {filters.max_ads_per_keyword or 'unlimited'}")
     print(f"  Regions:         {', '.join(filters.delivered_to_regions) if filters.delivered_to_regions else 'ALL'}")
     print(f"  Languages:       {', '.join(filters.languages) if filters.languages else 'all'}")
     print(f"  Sort order:      {filters.sort_order}")

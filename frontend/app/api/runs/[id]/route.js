@@ -125,6 +125,7 @@ export async function GET(request, { params }) {
       // not added here is silently dropped: the run page would then have no way
       // to explain its own behaviour.
       parallel_workers: live?.parallel_workers ?? null,
+      max_ads_per_keyword: live?.max_ads_per_keyword ?? null,
       profile_id: live?.profile_id ?? null,
       profile_about: live?.profile_about ?? null,
       profile_is_active: live?.profile_is_active ?? null,

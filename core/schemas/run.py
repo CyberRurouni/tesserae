@@ -56,7 +56,7 @@ class RunConfig(BaseModel):
     keywords_per_generation: int = 12       # the generator returns 10-15
     default_cooldown_seconds: int = 24 * 3600  # alive keywords: back in rotation daily
 
-    # AI relevance checkpoint pacing.
+    # AI relevance judging pacing.
     judge_batch_size: int = 10
     judge_max_concurrent: int = 5
 

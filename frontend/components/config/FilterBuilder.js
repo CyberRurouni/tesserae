@@ -49,6 +49,8 @@ const INITIAL = {
   cycles: 3,
   run_until_complete: false,
   parallel_workers: 1,
+  // Stop a keyword once it has extracted this many unique ads. 0 = unlimited.
+  max_ads_per_keyword: 1400,
   // Harvest: how many of the pool's best keywords to re-search, or an
   // explicit list that overrides the number.
   harvest_limit: 20,
@@ -242,6 +244,13 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
           .filter((lang) => lang && lang.toLowerCase() !== 'all');
 
     const platforms = Array.isArray(merged.platforms) && merged.platforms.length ? merged.platforms : INITIAL.platforms;
+    // Missing means the default; an explicit blank/0 means unlimited.
+    const restoredMaxAds =
+      merged.max_ads_per_keyword === ''
+        ? 0
+        : Number.isFinite(Number(merged.max_ads_per_keyword)) && Number(merged.max_ads_per_keyword) >= 0
+          ? Math.floor(Number(merged.max_ads_per_keyword))
+          : INITIAL.max_ads_per_keyword;
 
     return {
       ...merged,
@@ -258,6 +267,7 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
         Math.max(Number(merged.parallel_workers) || INITIAL.parallel_workers, 1),
         MAX_PARALLEL_WORKERS
       ),
+      max_ads_per_keyword: restoredMaxAds,
       harvest_limit: Math.max(0, Number(merged.harvest_limit) || INITIAL.harvest_limit),
       harvest_keywords: Array.isArray(merged.harvest_keywords) ? merged.harvest_keywords : [],
     };
@@ -619,6 +629,35 @@ export default function FilterBuilder({ onStart, onRunModeChange, initialData })
               {formData.parallel_workers === 1
                 ? 'One keyword at a time — slowest, but least likely to be challenged.'
                 : `${formData.parallel_workers} keywords searched at once. Faster, but a higher chance of a captcha. Drop back to 1 if you get blocked.`}
+            </p>
+
+            <div className="flex flex-col gap-3 rounded-md border border-border/60 p-4 sm:flex-row sm:items-center">
+              <label htmlFor="max_ads_per_keyword" className="text-sm font-medium text-foreground sm:w-40">
+                Max ads per keyword
+              </label>
+              <input
+                id="max_ads_per_keyword"
+                type="number"
+                min="0"
+                step="100"
+                inputMode="numeric"
+                value={formData.max_ads_per_keyword}
+                onChange={(e) =>
+                  update(
+                    'max_ads_per_keyword',
+                    e.target.value === '' ? '' : Math.max(0, Math.floor(Number(e.target.value) || 0))
+                  )
+                }
+                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground transition-colors focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring sm:w-40"
+              />
+              <span className="text-xs text-muted-foreground">
+                {Number(formData.max_ads_per_keyword) > 0
+                  ? 'Stop this keyword once it has collected this many unique ads.'
+                  : 'No cap — search each keyword until Meta runs out.'}
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Ads already collected when the cap is reached are still judged and saved. Leave blank or 0 for no cap.
             </p>
 
             <div className={cn('flex flex-col gap-3 sm:flex-row sm:items-center', formData.run_until_complete && 'opacity-50')}>
