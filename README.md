@@ -65,6 +65,22 @@ Then open http://localhost:3000.
 python3 -m interface.orchestrate --run-mode generate --cycles 3
 ```
 
+### Manual judging
+
+The assistant can scrape without Gemini, judge the heuristics-passed ads, and
+apply the verdicts to the normal run file:
+
+```bash
+python3 -m interface.manual scrape
+# fill data/agent_audits/verdicts_<run_id>.json
+python3 -m interface.manual apply <run_id>
+```
+
+The scrape reads the last saved search filters unless `--keywords` is passed.
+CLI options are saved back to that selection, so the Search page shows what the
+assistant used. While the scrape runs, open `/runs/<run_id>` to watch progress.
+The judging rules and workflow live in `AGENTS.md`.
+
 ## Configuration
 
 `.env` (see `.env.example`):

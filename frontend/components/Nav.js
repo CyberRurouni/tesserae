@@ -61,7 +61,8 @@ export function Nav() {
             >
               <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-primary" aria-hidden="true" />
               <span className="truncate">
-                Search running{active.current_keyword ? `: ${active.current_keyword}` : ''}
+                {active.mode === 'manual' ? 'Agent run' : 'Search running'}
+                {active.current_keyword ? `: ${active.current_keyword}` : ''}
               </span>
             </Link>
           )}

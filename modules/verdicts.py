@@ -92,9 +92,11 @@ def _remove(key: str, name: str, ids) -> int:
         return 0
     before = set(_load_mirror(name)) | _members(key)
     survivors = sorted(before - doomed)
+    removable = sorted(doomed & before)
     _save_mirror(name, survivors)
-    safe_redis_operation(run_state_broker.srem, key, *sorted(doomed & before))
-    return len(doomed & before)
+    if removable:
+        safe_redis_operation(run_state_broker.srem, key, *removable)
+    return len(removable)
 
 
 # ── global sets ──────────────────────────────────────────────────────────────
@@ -151,6 +153,15 @@ def forget_junk(category: str, ad_ids) -> int:
 
 def forget_rejected(profile_id: str, ad_ids) -> int:
     return _remove(REJECTED_KEY.format(profile_id=profile_id), f"rejected_{profile_id}", ad_ids)
+
+
+def delete_profile(profile_id: str) -> None:
+    """Drop every rejection for a deleted profile, Redis and disk."""
+    forget_rejected(profile_id, rejected_ids(profile_id))
+    _mirror_path(f"rejected_{profile_id}").unlink(missing_ok=True)
+    safe_redis_operation(
+        run_state_broker.delete, REJECTED_KEY.format(profile_id=profile_id)
+    )
 
 
 def move_rejected(old_profile_id: str, new_profile_id: str, ad_ids) -> int:

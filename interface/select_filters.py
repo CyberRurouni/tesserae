@@ -732,6 +732,8 @@ def build_scraping_filters(
         "platforms": platforms,
         "media_type": media_type,
         "keywords": keywords,
+        "custom_start_date": custom_start.isoformat() if custom_start else "",
+        "custom_end_date": custom_end.isoformat() if custom_end else "",
         "ad_age_hours": ad_age_hours,
         "max_ads_per_keyword": max_ads_per_keyword,
         "delivered_to_regions": delivered_regions,

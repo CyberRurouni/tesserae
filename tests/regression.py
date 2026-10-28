@@ -219,6 +219,17 @@ def test_judge():
         check("profile judge is never given the request",
               all("REQUEST (what they want RIGHT NOW" not in m["content"]
                   for m in Stub.prompts[0]))
+        check("profile judge no longer rejects seniority",
+              "Seniority is NOT a profile question" in Stub.prompts[0][0]["content"]
+              and "unrelated seniority" not in Stub.prompts[0][0]["content"])
+        check("profile judge treats placement roles as employment",
+              "staffing or placement agency" in Stub.prompts[0][0]["content"])
+        check("request judge does not treat silence as a conflict",
+              "Silence is NOT a conflict" in Stub.prompts[1][0]["content"]
+              and "Silence is not compliance" not in Stub.prompts[1][0]["content"])
+        request_prompt = " ".join(Stub.prompts[1][0]["content"].split())
+        check("request judge accepts remote with no country restriction",
+              "open on location" in request_prompt)
 
         Stub.payload = RuntimeError("model down")
         out = asyncio.run(rel.judge_ad_relevance(ads[:1], intent="jobs", additional_filters="r"))
@@ -228,7 +239,97 @@ def test_judge():
         rel.AIClient = original
 
 
+def test_manual_workflow():
+    print("\n[9b] manual verdict file")
+    import interface.manual as manual
+
+    pending = {
+        "run_id": "run_M",
+        "category": CATEGORY,
+        "profile_id": PROFILE,
+        "request_id": "req_1",
+        "ads": [
+            ad("m_1").model_dump(mode="json"),
+            ad("m_2").model_dump(mode="json"),
+            ad("m_3").model_dump(mode="json"),
+        ],
+    }
+    document = {
+        "verdicts": [
+            {"id": "m_1", "bucket": "accepted", "reason": "remote, no country restriction"},
+            {"id": "m_2", "bucket": "defer", "stage": "request", "reason": "on-site Lahore"},
+            {"id": "m_3", "bucket": "reject", "rejection_kind": "no_hiring", "reason": "course"},
+        ]
+    }
+    _, verdicts = manual._build_verdicts(pending, document)
+    check("manual accept maps to accepted", verdicts["m_1"].outcome == "accepted")
+    check("manual defer alias maps to deferred", verdicts["m_2"].outcome == "deferred")
+    check("manual reject alias maps to rejected",
+          verdicts["m_3"].outcome == "rejected"
+          and verdicts["m_3"].rejection_kind == "no_hiring")
+    check("manual stage defaults by bucket",
+          verdicts["m_1"].stage == "request" and verdicts["m_3"].stage == "profile")
+
+    try:
+        manual._build_verdicts(pending, {
+            "verdicts": [{"id": "m_1", "bucket": "accepted", "reason": ""}],
+        })
+    except SystemExit:
+        check("manual verdict without a reason is refused", True)
+    else:
+        check("manual verdict without a reason is refused", False)
+
+
 # ── 5. the scraper ──────────────────────────────────────────────────────────
+def test_manual_progress():
+    print("\n[9h] manual runs publish live progress")
+    from modules.storage import manual_progress
+
+    run_id = "run_manual_progress_test"
+    manual_progress.clear(run_id)
+    manual_progress.write(run_id, {
+        "status": "running",
+        "started_at": "2026-10-28T12:00:00+00:00",
+        "progress": 42,
+        "category": CATEGORY,
+        "keywords": ["kw"],
+        "counts": {"accepted": 0, "held": 0, "rejected": 0, "ai_failed": 0},
+    })
+    state = manual_progress.read(run_id)
+    check("a manual run is visible while it runs",
+          state is not None and state.get("mode") == "manual"
+          and state.get("progress") == 42)
+    check("and it is reported as the active run",
+          any(item.get("id") == run_id for item in manual_progress.list_active()))
+    manual_progress.clear(run_id)
+    check("applying clears the live progress", manual_progress.read(run_id) is None)
+
+
+def test_agent_mode_ui():
+    print("\n[9g] agent mode is explained in the frontend")
+    fe = Path(__file__).resolve().parents[1] / "frontend"
+    client = (fe / "app" / "config" / "ConfigClient.js").read_text()
+    dialog = (fe / "components" / "config" / "AgentModeDialog.js").read_text()
+    detail = (fe / "components" / "runs" / "RunDetail.js").read_text()
+    route = (fe / "app" / "api" / "runs" / "[id]" / "route.js").read_text()
+
+    check("the Search page has an Agent mode button",
+          "Agent mode" in client and "setAgentModeOpen(true)" in client)
+    check("the button opens the instructions",
+          "AgentModeDialog" in client and "open={agentModeOpen}" in client)
+    check("the popup says the assistant runs the scrape",
+          "assistant runs the scrape" in dialog
+          and "judges the ads that" in dialog)
+    check("the popup shows the manual commands",
+          "interface.manual scrape" in dialog
+          and "interface.manual apply" in dialog)
+    check("the popup keeps Gemini as legacy",
+          "Legacy mode" in dialog and "Start search" in dialog)
+    check("agent runs do not offer the UI stop button",
+          "isManual" in detail and "isLive && !isManual" in detail)
+    check("the run API forwards the manual mode", "mode: live?.mode" in route)
+
+
 def test_scraper():
     print("\n[10] the scraper skips what the filter says")
     import modules.scraper.main as sm
@@ -2206,6 +2307,26 @@ def test_filters_reach_meta():
           dates(ad_age_hours=24, custom_start_date=date(2020, 1, 1),
                 custom_end_date=date(2020, 3, 1))[0] == ["2020-01-01"])
 
+    import interface.select_filters as sf
+
+    saved_selection = {}
+    original_save = sf._save_last_selection
+    sf._save_last_selection = saved_selection.update
+    try:
+        sf.build_scraping_filters(
+            run_mode="existing",
+            non_interactive=True,
+            keywords=["python developer"],
+            custom_start_date="2026-10-25",
+            custom_end_date="2026-10-28",
+        )
+    finally:
+        sf._save_last_selection = original_save
+    check("the saved selection keeps a CLI date range",
+          saved_selection.get("custom_start_date") == "2026-10-25"
+          and saved_selection.get("custom_end_date") == "2026-10-28",
+          "the next visit to Search should show the range the assistant used")
+
     # ── the dead controls are gone, not merely hidden ────────────────────────
     fields = set(ScrapingFilters.model_fields)
     check("date_preset is gone from the schema",
@@ -2727,6 +2848,166 @@ def test_regate_held():
         om.judge_request_relevance, om.record_results = saved
 
 
+def test_profile_lifecycle():
+    print("\n[9e] profiles and requests start clean, activate, and delete")
+    import interface.profiles_api as api
+    from fastapi import HTTPException
+    from modules.profiles import active as active_store
+    from modules.profiles import deferred as deferred_store
+    from modules.profiles import held as held_store
+    from modules.profiles import store
+
+    async def fake_profile(current, edited):
+        return types.SimpleNamespace(
+            change="none", new_profile_required=False,
+            about="Regression profile", explanation="",
+        )
+
+    async def fake_request(current, edited):
+        return types.SimpleNamespace(
+            change="none", new_profile_required=False, explanation="",
+        )
+
+    async def widening_profile(current, edited):
+        return types.SimpleNamespace(
+            change="widening", new_profile_required=True,
+            about="Wider regression profile", explanation="",
+        )
+
+    saved_classifiers = (api.classify_profile_change, api.classify_request_change)
+    active_path = active_store.ACTIVE_FILE
+    saved_active = active_path.read_text(encoding="utf-8") if active_path.exists() else None
+    created_pids = []
+
+    api.classify_profile_change = fake_profile
+    api.classify_request_change = fake_request
+    try:
+        created = asyncio.run(api.apply_profile(
+            api.ApplyProfileRequest(text="Regression lifecycle profile")
+        ))
+        pid = created["profile"]["profile_id"]
+        created_pids.append(pid)
+        check("a new profile starts with no request", store.list_requests(pid) == [])
+        check("and no request is active",
+              (active_store.read_active() or {}).get("request_id") is None)
+
+        api.classify_profile_change = widening_profile
+        structural = asyncio.run(api.apply_profile(
+            api.ApplyProfileRequest(text="A wider objective", profile_id=pid)
+        ))
+        sid = structural["profile"]["profile_id"]
+        created_pids.append(sid)
+        check("a structural new profile also starts with no request",
+              store.list_requests(sid) == [])
+
+        other_request = store.create_request(sid, "Other profile request")
+        try:
+            asyncio.run(api.activate(
+                api.ActivateRequest(profile_id=pid, request_id=other_request.request_id)
+            ))
+            rejected_other = False
+        except HTTPException:
+            rejected_other = True
+        check("activation rejects another profile's request", rejected_other)
+
+        asyncio.run(api.delete_profile(sid))
+        created_pids.remove(sid)
+        api.classify_profile_change = fake_profile
+
+        asyncio.run(api.activate(api.ActivateRequest(profile_id=pid)))
+        req1 = asyncio.run(api.apply_request(
+            api.ApplyRequestRequest(text="Remote Python", profile_id=pid)
+        ))["request"]["request_id"]
+        check("a new request becomes active",
+              (active_store.read_active() or {}).get("request_id") == req1)
+
+        req2 = asyncio.run(api.apply_request(
+            api.ApplyRequestRequest(text="Remote backend", profile_id=pid)
+        ))["request"]["request_id"]
+        check("a later request also becomes active",
+              (active_store.read_active() or {}).get("request_id") == req2)
+
+        asyncio.run(api.activate(
+            api.ActivateRequest(profile_id=pid, request_id=req1)
+        ))
+        check("activation switches to the chosen request",
+              (active_store.read_active() or {}).get("request_id") == req1)
+
+        held_store.hold_ad(
+            pid, ad("lifecycle_req_hold").model_dump(mode="json"),
+            stage="request", request_id=req1, confidence=0.6, threshold=0.7,
+        )
+        asyncio.run(api.delete_request(pid, req1))
+        check("deleting the active request falls back to another",
+              (active_store.read_active() or {}).get("request_id") == req2)
+        check("and drops holds that belonged only to it",
+              all(record.get("request_id") != req1 for record in held_store.load(pid)))
+
+        asyncio.run(api.delete_request(pid, req2))
+        check("deleting the last request clears the active request",
+              (active_store.read_active() or {}).get("request_id") is None)
+        check("the profile survives deleting its last request",
+              store.get_profile(pid) is not None)
+
+        req3 = asyncio.run(api.apply_request(
+            api.ApplyRequestRequest(text="Remote data roles", profile_id=pid)
+        ))["request"]["request_id"]
+        store.add_leads(pid, [ad("lifecycle_lead").model_dump(mode="json")])
+        deferred_store.defer_ad(
+            pid, ad("lifecycle_deferred").model_dump(mode="json"), req3, reason="r"
+        )
+        held_store.hold_ad(
+            pid, ad("lifecycle_held").model_dump(mode="json"),
+            stage="request", request_id=req3, confidence=0.6, threshold=0.7,
+        )
+        V.record_rejected(pid, ["lifecycle_rejected"])
+
+        asyncio.run(api.delete_profile(pid))
+        created_pids.remove(pid)
+        check("deleting a profile removes the profile", store.get_profile(pid) is None)
+        check("and its requests", store.list_requests(pid) == [])
+        check("and its leads", store.load_leads(pid) == [])
+        check("and its deferred ads", deferred_store.load(pid) == [])
+        check("and its held ads", held_store.load(pid) == [])
+        check("and its rejections", V.rejected_ids(pid) == set())
+        check("and the active pointer no longer names it",
+              (active_store.read_active() or {}).get("profile_id") != pid)
+    finally:
+        api.classify_profile_change, api.classify_request_change = saved_classifiers
+        for leftover in created_pids:
+            if store.get_profile(leftover) is None:
+                continue
+            store.delete_profile(leftover)
+            deferred_store.delete_profile(leftover)
+            held_store.delete_profile(leftover)
+            V.delete_profile(leftover)
+        if saved_active is None:
+            active_path.unlink(missing_ok=True)
+        else:
+            active_path.parent.mkdir(parents=True, exist_ok=True)
+            active_path.write_text(saved_active, encoding="utf-8")
+
+
+def test_profile_management_ui():
+    print("\n[9f] profile and request management is visible")
+    fe = Path(__file__).resolve().parents[1] / "frontend"
+    about = (fe / "app" / "about" / "AboutClient.js").read_text()
+    looking = (fe / "app" / "looking-for" / "LookingForClient.js").read_text()
+
+    check("the About page can delete a profile",
+          "Delete profile" in about and "method: 'DELETE'" in about)
+    check("a new profile gets new-profile copy, not in-place copy",
+          "isNew={!selectedId}" in about and "New profile" in about)
+    check("the request page shows the active request",
+          "active_request_id" in looking and "Active" in looking)
+    check("the request page can activate another request",
+          "Use this request" in looking and "/api/profiles/activate" in looking)
+    check("the request page can delete a request",
+          "Delete request" in looking and "method: 'DELETE'" in looking)
+    check("a new request gets new-request copy",
+          "isNew={!requestId}" in looking and "New request" in looking)
+
+
 def test_threshold_ui():
     print("\n[9d] the UI exposes strictness and the Not sure yet bucket")
     fe = Path(__file__).resolve().parents[1] / "frontend"
@@ -2765,6 +3046,9 @@ def main():
     test_record_routing()
     test_filter()
     test_judge()
+    test_manual_workflow()
+    test_manual_progress()
+    test_agent_mode_ui()
     test_split_judge_and_held()
     test_regate_held()
     test_scraper()
@@ -2784,6 +3068,8 @@ def main():
     test_filters_reach_meta()
     test_heuristic_matching()
     test_run_page_review_controls()
+    test_profile_lifecycle()
+    test_profile_management_ui()
     test_threshold_ui()
 
     # Leave nothing behind. Safe because TESSERAE_REDIS_DB_OFFSET moved these

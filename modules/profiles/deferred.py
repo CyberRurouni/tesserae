@@ -132,6 +132,16 @@ def load(profile_id: str) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
+def delete_profile(profile_id: str) -> None:
+    """Drop every deferral for a deleted profile, Redis and disk."""
+    for ad_id in deferred_ids(profile_id):
+        safe_redis_operation(run_state_broker.delete, _key(profile_id, ad_id))
+    safe_redis_operation(
+        run_state_broker.delete, DEFERRED_INDEX_KEY.format(profile_id=profile_id)
+    )
+    _json_path(profile_id).unlink(missing_ok=True)
+
+
 def candidates_for_new_request(profile_id: str, request_id: str) -> list[dict]:
     """
     Deferred ads worth re-judging under a new request profile.
@@ -154,20 +164,35 @@ def candidates_for_new_request(profile_id: str, request_id: str) -> list[dict]:
 
 def resolve(profile_id: str, ad_id: str) -> None:
     """Drop an ad from the bucket once it is accepted or goes out of scope."""
-    safe_redis_operation(run_state_broker.delete, _key(profile_id, ad_id))
-    safe_redis_operation(
-        run_state_broker.srem, DEFERRED_INDEX_KEY.format(profile_id=profile_id), ad_id
-    )
+    resolve_many(profile_id, [ad_id])
+
+
+def resolve_many(profile_id: str, ad_ids) -> int:
+    """Drop many ads in one disk write. Returns how many records were removed."""
+    if not profile_id:
+        return 0
+    doomed = {str(ad_id) for ad_id in ad_ids if ad_id}
+    if not doomed:
+        return 0
+
+    for ad_id in doomed:
+        safe_redis_operation(run_state_broker.delete, _key(profile_id, ad_id))
+        safe_redis_operation(
+            run_state_broker.srem, DEFERRED_INDEX_KEY.format(profile_id=profile_id), ad_id
+        )
+
     path = _json_path(profile_id)
     if not path.exists():
-        return
+        return 0
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return
-    kept = [r for r in data if r.get("ad_archive_id") != ad_id]
-    if len(kept) != len(data):
+        return 0
+    kept = [r for r in data if r.get("ad_archive_id") not in doomed]
+    removed = len(data) - len(kept)
+    if removed:
         path.write_text(json.dumps(kept, indent=2, ensure_ascii=False), encoding="utf-8")
+    return removed
 
 
 def _write_record(profile_id: str, ad_id: str, record: dict) -> None:

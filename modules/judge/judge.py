@@ -55,19 +55,28 @@ answers.
 STAGE 1 — does this ad offer actual employment to anyone?
   NO  -> outcome "rejected", rejection_kind "no_hiring".
           Nobody is being employed: a course, bootcamp, certification, webinar,
-          B2B / recruiting / outsourcing / staffing service, job board,
-          marketplace, agency product, or content such as a podcast, talk or
-          newsletter. A company advertising that it recruits for OTHER companies
-          is a service provider, not an employer.
+          B2B / recruiting / outsourcing / staffing service sold TO employers,
+          job board, marketplace, agency product, or content such as a podcast,
+          talk or newsletter. A company that sells recruitment services to
+          employers is a service provider, not an employer.
   YES -> go to stage 2.
+
+  A staffing or placement agency that advertises a specific open role for a
+  client IS offering employment to candidates. It is not "no_hiring" merely
+  because the employer is a client. The same applies to a walk-in drive or a
+  recruiter posting a named vacancy.
 
 STAGE 2 — is the role inside what this person actually does?
   NO  -> outcome "rejected", rejection_kind "not_for_me".
-          An employer IS hiring, but not for them: a different field, a
-          different stack, unrelated seniority. This is specific to THIS person
-          — another profile might well want it, so it is never universally
-          useless.
+          An employer IS hiring, but not for them: a different field or a
+          different stack. This is specific to THIS person — another profile
+          might well want it, so it is never universally useless.
   YES -> outcome "accepted".
+
+  Seniority is NOT a profile question. A senior or junior version of the work
+  is still the same field. Do not reject because the ad asks for more or fewer
+  years, a different contract type, a location, remote/on-site, salary, or start
+  date. Those belong to the request judge.
 
   Stage 2 is about the ROLE, not the vocabulary around it. Judge what the person
   would actually DO all day, and require that the ad names that work as the job
@@ -95,7 +104,9 @@ Judging rules:
 - Judge the ad's CONTENT, never the mere presence of keywords. An ad containing
   the word "hiring" is not enough — it must actually offer a role.
 - When genuinely unsure at stage 1, answer "no_hiring".
-- When genuinely unsure at stage 2, answer "not_for_me".
+- When genuinely unsure at stage 2, accept if the ad names the work as the job
+  itself. Reject only when the role is clearly outside the field; the request
+  judge can still defer an in-field ad that does not fit right now.
 - Give "confidence" as your certainty in an ACCEPTED answer. For a rejection it
   is recorded but not used for gating.
 
@@ -126,14 +137,30 @@ HARD CONSTRAINTS
   interested in", "never" and "exclude" mark hard constraints.
 - Apply every hard constraint literally. If the ad explicitly violates one,
   outcome "deferred".
-- If the ad does not state enough to verify a hard constraint, outcome
-  "deferred". Silence is not compliance. This matters most for location,
-  remote/on-site, company headquarters and seniority.
+- Silence is NOT a conflict. If the ad does not state a hard constraint, do not
+  defer for it. Only defer when the ad's own text explicitly contradicts a hard
+  constraint.
+- A remote or global ad that names no candidate-country restriction is open on
+  location. Do not infer a country restriction from the word "remote", from the
+  company's headquarters, or from the markets the company serves.
 - A company-location constraint is about where the company is based, not the
   nationality of teammates. An on-site exception is about the job's location.
+- Seniority is a hard constraint only when the request states a limit. If the
+  ad's requirement is within or below the request's limit, accept it. Defer
+  only when the ad explicitly requires more than the request allows.
 - Do not infer a requirement from a word the request does not say. "Remote"
   does not mean "worldwide"; "must not be based in India" does not reject an ad
   that simply mentions India as a market.
+
+EXAMPLES
+- Request: "Only Pakistan and in Pakistan only Islamabad."
+  Defer: "We are hiring in Mumbai"; "Hiring only Europeans"; "Now hiring
+  Asians, except for Pakistanis."
+  Accept: "We are hiring"; "Hiring worldwide"; "Looking for candidates in
+  Europe and Asia, including India and Bangladesh"; "Remote, no location
+  restriction stated."
+- A company based abroad is not a location conflict unless the ad says the
+  candidate must be there or must not be in Pakistan.
 
 SOFT PREFERENCES
 - "Prefer", "ideally", "open to" and similar are preferences. They affect

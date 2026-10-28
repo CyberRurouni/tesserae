@@ -73,7 +73,7 @@ async function listLiveRuns() {
         category: run.category || 'career_jobs',
         status: run.status,
         progress: run.progress ?? 0,
-        mode: run.config?.run_mode ?? null,
+        mode: run.mode ?? run.config?.run_mode ?? null,
         cycles: run.cycles ?? null,
         run_until_complete: run.config?.run_until_complete ?? null,
         keywords: buildRunKeywords({

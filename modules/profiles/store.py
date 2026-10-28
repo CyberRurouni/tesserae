@@ -156,6 +156,46 @@ def create_request(
     )
 
 
+def delete_request(profile_id: str, request_id: str) -> bool:
+    """Remove one request, but only when it really belongs to this profile."""
+    data = _read_all()
+    raw = data["requests"].get(request_id)
+    if not raw or raw.get("profile_id") != profile_id:
+        return False
+    data["requests"].pop(request_id)
+    _write_all(data)
+    return True
+
+
+def delete_profile(profile_id: str) -> bool:
+    """
+    Remove a profile, its requests and its lead list.
+
+    The per-profile verdict buckets (rejected, deferred, held) are cleaned by
+    their own stores — this function owns only the profile records and leads.
+    """
+    data = _read_all()
+    if profile_id not in data["profiles"]:
+        return False
+    data["profiles"].pop(profile_id)
+    data["requests"] = {
+        request_id: raw
+        for request_id, raw in data["requests"].items()
+        if raw.get("profile_id") != profile_id
+    }
+    _write_all(data)
+
+    leads_path(profile_id).unlink(missing_ok=True)
+    safe_redis_operation(
+        run_state_broker.delete, PROFILE_KEY.format(profile_id=profile_id)
+    )
+    safe_redis_operation(
+        run_state_broker.delete, LEADS_KEY.format(profile_id=profile_id)
+    )
+    safe_redis_operation(run_state_broker.srem, LEADS_INDEX_KEY, profile_id)
+    return True
+
+
 # ── lead lists ───────────────────────────────────────────────────────────────
 def leads_path(profile_id: str) -> Path:
     return LEADS_DIR / f"{profile_id}.json"

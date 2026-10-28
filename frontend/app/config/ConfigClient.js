@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/Button';
+import AgentModeDialog from '@/components/config/AgentModeDialog';
 import FilterBuilder from '@/components/config/FilterBuilder';
 import { PageShell } from '@/components/Nav';
 
@@ -22,6 +23,7 @@ export default function ConfigClient() {
   const [loading, setLoading] = useState(true);
   const [startError, setStartError] = useState('');
   const [activeRun, setActiveRun] = useState(null);
+  const [agentModeOpen, setAgentModeOpen] = useState(false);
   // Lets the toggle handler persist without re-creating the callback.
   const selectionRef = useRef(null);
 
@@ -144,12 +146,17 @@ export default function ConfigClient() {
     <PageShell
       title="Search"
       description="Choose your keywords and start. Your profile and what you are looking for are set on their own pages."
+      actions={
+        <Button variant="outline" onClick={() => setAgentModeOpen(true)}>
+          Agent mode
+        </Button>
+      }
     >
       {activeRun && (
         <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-warning/30 bg-warning/10 px-4 py-3 text-sm">
           <span className="text-foreground">
-            A search is already running
-            {activeRun.current_keyword ? `, currently on “${activeRun.current_keyword}”` : ''}. Only one search can run at a time.
+            {activeRun.mode === 'manual' ? 'An agent run is already in progress' : 'A search is already running'}
+            {activeRun.current_keyword ? `, currently on “${activeRun.current_keyword}”` : ''}. Only one run can happen at a time.
           </span>
           <Link href={`/runs/${activeRun.run_id}`}>
             <Button variant="outline" size="sm">Go to it</Button>
@@ -168,6 +175,8 @@ export default function ConfigClient() {
         onRunModeChange={handleRunModeChange}
         initialData={lastSelection}
       />
+
+      <AgentModeDialog open={agentModeOpen} onClose={() => setAgentModeOpen(false)} />
     </PageShell>
   );
 }

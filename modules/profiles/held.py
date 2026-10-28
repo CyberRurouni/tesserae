@@ -53,6 +53,35 @@ def load(profile_id: str) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
+def delete_profile(profile_id: str) -> None:
+    """Drop every hold for a deleted profile."""
+    if not profile_id:
+        return
+    _json_path(profile_id).unlink(missing_ok=True)
+
+
+def delete_request(profile_id: str, request_id: str) -> None:
+    """Drop request-stage holds for a deleted request, keeping profile holds."""
+    if not profile_id or not request_id:
+        return
+    path = _json_path(profile_id)
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    kept = [
+        record for record in data
+        if not (
+            record.get("stage") == HELD_STAGE_REQUEST
+            and record.get("request_id") == request_id
+        )
+    ]
+    if len(kept) != len(data):
+        path.write_text(json.dumps(kept, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def for_lens(profile_id: str, request_id: str | None) -> list[dict]:
     """
     Held records that apply to one profile + request.
@@ -111,18 +140,28 @@ def hold_ad(
 
 def resolve(profile_id: str, ad_id: str) -> None:
     """Drop every hold for one ad once it is accepted, deferred or rejected."""
+    resolve_many(profile_id, [ad_id])
+
+
+def resolve_many(profile_id: str, ad_ids) -> int:
+    """Drop many holds in one disk write. Returns how many records were removed."""
     if not profile_id:
-        return
+        return 0
+    doomed = {str(ad_id) for ad_id in ad_ids if ad_id}
+    if not doomed:
+        return 0
     path = _json_path(profile_id)
     if not path.exists():
-        return
+        return 0
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return
-    kept = [r for r in data if r.get("ad_archive_id") != ad_id]
-    if len(kept) != len(data):
+        return 0
+    kept = [r for r in data if r.get("ad_archive_id") not in doomed]
+    removed = len(data) - len(kept)
+    if removed:
         path.write_text(json.dumps(kept, indent=2, ensure_ascii=False), encoding="utf-8")
+    return removed
 
 
 def update_threshold(

@@ -9,8 +9,19 @@ import { cn } from '@/lib/utils';
 
 const CLASSIFY_DEBOUNCE_MS = 1200;
 
-function ChangeBanner({ verdict, busy }) {
+function ChangeBanner({ verdict, busy, isNew }) {
   if (busy && !verdict) return <p className="text-xs text-muted-foreground">Reading your edit…</p>;
+  if (isNew) {
+    return (
+      <div className="rounded-md border border-border/60 bg-muted/40 px-4 py-3 text-sm">
+        <p className="font-semibold text-foreground">New request</p>
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+          This will be saved as a separate request and made active. Ads held back under other
+          requests stay parked until they are re-judged.
+        </p>
+      </div>
+    );
+  }
   if (!verdict) return null;
 
   if (!verdict.new_profile_required) {
@@ -81,15 +92,27 @@ export default function LookingForClient() {
   const profile = profiles.find((f) => f.profile_id === profileId) ?? null;
   const requests = profile?.requests ?? [];
   const request = requests.find((r) => r.request_id === requestId) ?? null;
+  const activeProfile = data?.active_profile_id === profileId;
+  const activeRequest = activeProfile && Boolean(requestId) && data?.active_request_id === requestId;
 
   useEffect(() => {
     const current = (data?.profiles ?? []).find((f) => f.profile_id === profileId);
-    const first = current?.requests?.[0];
-    setRequestId(first?.request_id ?? null);
-    setDraft(first?.request_text ?? '');
+    const currentRequests = current?.requests ?? [];
+    setRequestId((prev) => {
+      if (prev && currentRequests.some((r) => r.request_id === prev)) return prev;
+      const activeId = data?.active_profile_id === profileId
+        ? data?.active_request_id
+        : null;
+      const active = currentRequests.find((r) => r.request_id === activeId);
+      return active?.request_id ?? currentRequests[0]?.request_id ?? null;
+    });
+  }, [profileId, data]);
+
+  useEffect(() => {
+    setDraft(request?.request_text ?? '');
     setDirty(false);
     setVerdict(null);
-  }, [profileId, data]);
+  }, [requestId, request?.request_text]);
 
   useEffect(() => {
     setProfileThreshold(request?.profile_threshold ?? 0.5);
@@ -97,7 +120,7 @@ export default function LookingForClient() {
   }, [request?.request_id, request?.profile_threshold, request?.request_threshold]);
 
   useEffect(() => {
-    if (!dirty || !draft.trim()) {
+    if (!requestId || !dirty || !draft.trim()) {
       setVerdict(null);
       return undefined;
     }
@@ -119,6 +142,53 @@ export default function LookingForClient() {
     }, CLASSIFY_DEBOUNCE_MS);
     return () => clearTimeout(timer.current);
   }, [draft, dirty, profileId, requestId]);
+
+  const activateRequest = async () => {
+    if (!profileId || !requestId) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      const res = await fetch('/api/profiles/activate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile_id: profileId, request_id: requestId }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || 'Could not activate request');
+      await load();
+      setMessage({ tone: 'success', text: 'This request is now active for searches.' });
+    } catch (error) {
+      setMessage({ tone: 'error', text: error.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteRequest = async () => {
+    if (!profileId || !requestId) return;
+    const lastRequest = requests.length <= 1
+      ? ' This is the profile’s last request, so searches will run without one until you add another.'
+      : '';
+    if (!window.confirm(`Delete this request? Its leads stay with the profile, but this request cannot be restored.${lastRequest}`)) {
+      return;
+    }
+    setBusy(true);
+    setMessage(null);
+    try {
+      const res = await fetch(
+        `/api/profiles/${encodeURIComponent(profileId)}/requests/${encodeURIComponent(requestId)}`,
+        { method: 'DELETE' }
+      );
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || 'Could not delete request');
+      await load();
+      setMessage({ tone: 'success', text: 'Request deleted.' });
+    } catch (error) {
+      setMessage({ tone: 'error', text: error.message });
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const save = async (accept = true) => {
     setBusy(true);
@@ -144,11 +214,13 @@ export default function LookingForClient() {
         setMessage({ tone: 'info', text: 'Declined — your request is unchanged.' });
         return;
       }
+      setDirty(false);
+      setVerdict(null);
       setMessage({
         tone: 'success',
         text:
           body.status === 'created'
-            ? 'New request saved. Ads held back under the old one are eligible again.'
+            ? 'New request saved and active.'
             : 'Request updated.',
       });
       await load();
@@ -269,8 +341,15 @@ export default function LookingForClient() {
                       : 'border-border/60 hover:border-foreground/20 hover:bg-accent/40'
                   )}
                 >
-                  <span className="truncate text-sm font-semibold text-foreground">
-                    {f.about || 'Untitled'}
+                  <span className="flex items-center justify-between gap-2">
+                    <span className="truncate text-sm font-semibold text-foreground">
+                      {f.about || 'Untitled'}
+                    </span>
+                    {f.profile_id === data?.active_profile_id && (
+                      <span className="shrink-0 rounded-full bg-success/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-success">
+                        Active
+                      </span>
+                    )}
                   </span>
                 </button>
               ))}
@@ -302,8 +381,16 @@ export default function LookingForClient() {
                       : 'border-border/60 hover:border-foreground/20 hover:bg-accent/40'
                   )}
                 >
-                  <span className="line-clamp-2 text-foreground">
-                    {r.request_text.slice(0, 120) || '(empty)'}
+                  <span className="flex items-start justify-between gap-2">
+                    <span className="line-clamp-2 text-foreground">
+                      {r.request_text.slice(0, 120) || '(empty)'}
+                    </span>
+                    {profileId === data?.active_profile_id &&
+                      r.request_id === data?.active_request_id && (
+                        <span className="shrink-0 rounded-full bg-success/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-success">
+                          Active
+                        </span>
+                      )}
                   </span>
                 </button>
               ))}
@@ -314,8 +401,13 @@ export default function LookingForClient() {
         <div className="space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle className="text-lg">
+              <CardTitle className="flex items-center gap-2 text-lg">
                 {request ? 'Edit this request' : 'New request'}
+                {activeRequest && (
+                  <span className="rounded-full bg-success/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-success">
+                    Active
+                  </span>
+                )}
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -331,7 +423,7 @@ export default function LookingForClient() {
                 className="w-full rounded-md border border-input bg-background p-4 text-sm leading-relaxed text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus:border-ring focus:ring-1 focus:ring-ring"
               />
 
-              <ChangeBanner verdict={verdict} busy={classifying} />
+              <ChangeBanner verdict={verdict} busy={classifying} isNew={!requestId} />
 
               {message && (
                 <div
@@ -355,6 +447,16 @@ export default function LookingForClient() {
                 {verdict?.new_profile_required && (
                   <Button variant="outline" onClick={() => save(false)} disabled={busy}>
                     Keep my current request
+                  </Button>
+                )}
+                {request && !activeRequest && (
+                  <Button variant="outline" onClick={activateRequest} disabled={busy}>
+                    Use this request
+                  </Button>
+                )}
+                {request && (
+                  <Button variant="destructive" onClick={deleteRequest} disabled={busy}>
+                    Delete request
                   </Button>
                 )}
                 {dirty && <span className="text-xs text-muted-foreground">Unsaved changes</span>}

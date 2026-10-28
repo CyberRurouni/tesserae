@@ -54,6 +54,11 @@ def set_active(profile_id: str, request_id: str | None = None) -> None:
     )
 
 
+def clear_active() -> None:
+    """Remove the pointer when its profile has been deleted."""
+    ACTIVE_FILE.unlink(missing_ok=True)
+
+
 def active_profile() -> store.Profile | None:
     data = read_active()
     return store.get_profile(data["profile_id"]) if data else None

@@ -11,13 +11,18 @@
   ],
   "media_type": "all",
   "keywords": [
-    "rust developer"
+    "AI engineers"
   ],
+  "custom_start_date": "2026-10-21",
+  "custom_end_date": "2026-10-28",
   "ad_age_hours": "720",
+  "max_ads_per_keyword": 30,
   "delivered_to_regions": [
     "ALL"
   ],
-  "languages": "en",
+  "languages": [
+    "en"
+  ],
   "sort_order": "relevance",
   "heuristic_patterns": {
     "require_ad_text_patterns": [],
@@ -26,20 +31,5 @@
       "course",
       "enroll"
     ]
-  },
-  "custom_start_date": "",
-  "custom_end_date": "",
-  "regions": "ALL",
-  "run_mode": "existing",
-  "cycles": 3,
-  "run_until_complete": false,
-  "parallel_workers": 3,
-  "harvest_limit": 10,
-  "harvest_keywords": null,
-  "profile_id": "fam_ai-systems-architect_301c03",
-  "request_id": "req_ai-systems-architect_301c03_20bdae",
-  "ad_age": 720,
-  "last_keywords": [
-    "rust developer"
-  ]
+  }
 }

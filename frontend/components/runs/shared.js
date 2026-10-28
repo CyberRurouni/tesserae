@@ -5,6 +5,7 @@
 export const STATUS_STYLES = {
   starting: 'text-info',
   running: 'text-info',
+  awaiting_verdicts: 'text-info',
   completed: 'text-success',
   failed: 'text-destructive',
   cancelling: 'text-warning',
@@ -17,6 +18,7 @@ export const STATUS_STYLES = {
 export const STATUS_LABELS = {
   starting: 'Starting',
   running: 'Searching…',
+  awaiting_verdicts: 'Judging…',
   completed: 'Finished',
   failed: 'Failed',
   cancelling: 'Stopping…',

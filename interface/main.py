@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from genesis.config import ADS_DIR
 from core.schemas.filters import DEFAULT_MAX_ADS_PER_KEYWORD
+from modules.storage import manual_progress
 
 from interface import log_buffer
 from interface.profiles_api import router as profiles_router
@@ -148,6 +149,10 @@ def live_run() -> tuple[str, dict] | None:
             )
             continue
         return run_id, state
+
+    manual = manual_progress.latest_active()
+    if manual:
+        return manual["id"], manual
     return None
 
 
@@ -771,6 +776,13 @@ async def cancel_run(run_id: str):
     """
     state = run_states.get(run_id)
     if state is None:
+        manual = manual_progress.read(run_id)
+        if manual and manual.get("status") not in TERMINAL_STATES:
+            return {
+                "run_id": run_id,
+                "status": manual.get("status"),
+                "note": "Agent runs are stopped by the assistant, not from the UI.",
+            }
         raise HTTPException(404, "Run not found")
 
     status = state.get("status")
@@ -792,7 +804,8 @@ async def get_active_run():
         return {"active": None}
     run_id, state = busy
     return {"active": {"run_id": run_id, "status": state.get("status"),
-                       "current_keyword": state.get("current_keyword")}}
+                       "current_keyword": state.get("current_keyword"),
+                       "mode": state.get("mode")}}
 
 
 @app.get("/api/runs")
@@ -841,6 +854,24 @@ async def list_runs(limit: int = 50):
                 }
             )
 
+    for state in manual_progress.list_active():
+        runs.append(
+            {
+                "id": state["id"],
+                "category": state.get("category") or "career_jobs",
+                "status": state.get("status"),
+                "started_at": state.get("started_at", ""),
+                "progress": state.get("progress", 0),
+                "mode": state.get("mode"),
+                "keywords": state.get("keywords") or [],
+                "current_keyword": state.get("current_keyword"),
+                "counts": state.get(
+                    "counts",
+                    {"accepted": 0, "held": 0, "rejected": 0, "ai_failed": 0},
+                ),
+            }
+        )
+
     runs.sort(key=lambda run: run.get("started_at") or "", reverse=True)
     return {"runs": runs[:limit]}
 
@@ -850,6 +881,10 @@ async def get_run(run_id: str):
     """Full run detail (live state takes precedence over the saved file)."""
     if run_id in run_states:
         return run_states[run_id]
+
+    manual = manual_progress.read(run_id)
+    if manual and manual.get("status") not in TERMINAL_STATES:
+        return manual
 
     run_file = _find_run_file(run_id)
     if run_file is None:
@@ -885,6 +920,19 @@ async def get_run_status(run_id: str):
             "current_keyword": state.get("current_keyword"),
             "counts": state.get("counts", {}),
             "error": state.get("error"),
+        }
+
+    manual = manual_progress.read(run_id)
+    if manual and manual.get("status") not in TERMINAL_STATES:
+        return {
+            "id": run_id,
+            "status": manual.get("status"),
+            "progress": manual.get("progress", 0),
+            "current_keyword": manual.get("current_keyword"),
+            "keywords": manual.get("keywords") or [],
+            "counts": manual.get("counts", {}),
+            "error": manual.get("error"),
+            "mode": manual.get("mode"),
         }
 
     run_file = _find_run_file(run_id)

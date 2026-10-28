@@ -24,7 +24,12 @@ from modules.profiles.classifier import (
     classify_profile_change,
     classify_request_change,
 )
-from modules.verdicts import accepted_ids, junk_ids, rejected_ids
+from modules.verdicts import (
+    accepted_ids,
+    delete_profile as delete_rejected_profile,
+    junk_ids,
+    rejected_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,11 +77,6 @@ class ThresholdsRequest(BaseModel):
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
-def _active_request_text(profile_id: str) -> str:
-    requests = store.list_requests(profile_id)
-    return requests[0].request_text if requests else ""
-
-
 def _summary(profile: store.Profile) -> dict:
     """
     Per-profile counts.
@@ -112,8 +112,9 @@ def _summary(profile: store.Profile) -> dict:
 # ── reads ───────────────────────────────────────────────────────────────────
 @router.get("")
 async def list_profiles():
-    from modules.profiles.active import read_active
+    from modules.profiles.active import active_request_id, read_active
 
+    active_request_id()  # repair a pointer written before requests existed
     current = read_active() or {}
     return {
         "profiles": [_summary(f) for f in store.list_profiles()],
@@ -178,28 +179,75 @@ async def activate(payload: ActivateRequest):
     profile = store.get_profile(payload.profile_id)
     if profile is None:
         raise HTTPException(404, "Profile not found")
-    current = read_active() or {}
-    # The carried-over request only counts if it belongs to THIS profile: a
-    # request id from the profile being switched away from would bind runs to
-    # another profile's text, and the deferred bucket would never match.
-    carried = current.get("request_id")
-    if carried and store.get_request(carried) is not None and \
-            store.get_request(carried).profile_id != payload.profile_id:
-        carried = None
-    request_id = payload.request_id or carried
-    if not request_id:
-        requests = store.list_requests(payload.profile_id)
-        request_id = requests[-1].request_id if requests else None
+
+    if payload.request_id:
+        requested = store.get_request(payload.request_id)
+        if requested is None or requested.profile_id != payload.profile_id:
+            raise HTTPException(404, "Request not found for this profile")
+        request_id = payload.request_id
+    else:
+        current = read_active() or {}
+        # The carried-over request only counts if it belongs to THIS profile: a
+        # request id from the profile being switched away from would bind runs
+        # to another profile's text, and the deferred bucket would never match.
+        carried = current.get("request_id") if current.get("profile_id") == payload.profile_id else None
+        if carried and store.get_request(carried) is not None:
+            request_id = carried
+        else:
+            requests = store.list_requests(payload.profile_id)
+            request_id = requests[-1].request_id if requests else None
+
     set_active(payload.profile_id, request_id)
     return {"status": "activated", "profile_id": payload.profile_id,
             "request_id": request_id}
 
 
-def request_text_of(request_id: str | None) -> str:
-    if not request_id:
-        return ""
-    existing = store.get_request(request_id)
-    return existing.request_text if existing else ""
+@router.delete("/{profile_id}/requests/{request_id}")
+async def delete_request(profile_id: str, request_id: str):
+    from modules.profiles.active import read_active, set_active
+
+    if store.get_profile(profile_id) is None:
+        raise HTTPException(404, "Profile not found")
+    if not store.delete_request(profile_id, request_id):
+        raise HTTPException(404, "Request not found for this profile")
+    held_store.delete_request(profile_id, request_id)
+
+    current = read_active() or {}
+    if current.get("profile_id") == profile_id and current.get("request_id") == request_id:
+        remaining = store.list_requests(profile_id)
+        set_active(profile_id, remaining[-1].request_id if remaining else None)
+
+    logger.info("🗑️ Deleted request %s from profile %s", request_id, profile_id)
+    return {"status": "deleted", "profile_id": profile_id, "request_id": request_id}
+
+
+@router.delete("/{profile_id}")
+async def delete_profile(profile_id: str):
+    from modules.profiles.active import clear_active, read_active, set_active
+
+    if store.get_profile(profile_id) is None:
+        raise HTTPException(404, "Profile not found")
+
+    was_active = (read_active() or {}).get("profile_id") == profile_id
+    store.delete_profile(profile_id)
+    deferred_store.delete_profile(profile_id)
+    held_store.delete_profile(profile_id)
+    delete_rejected_profile(profile_id)
+
+    if was_active:
+        remaining = store.list_profiles()
+        if remaining:
+            next_profile = remaining[0]
+            requests = store.list_requests(next_profile.profile_id)
+            set_active(
+                next_profile.profile_id,
+                requests[-1].request_id if requests else None,
+            )
+        else:
+            clear_active()
+
+    logger.info("🗑️ Deleted profile %s", profile_id)
+    return {"status": "deleted", "profile_id": profile_id}
 
 
 def thresholds_of(request_id: str | None) -> tuple[float, float]:
@@ -292,10 +340,9 @@ async def apply_profile(payload: ApplyProfileRequest):
     if not text:
         raise HTTPException(400, "Profile text cannot be empty")
 
-    from modules.profiles.active import read_active, set_active
+    from modules.profiles.active import set_active
 
     profile = store.get_profile(payload.profile_id) if payload.profile_id else None
-    current = read_active() or {}
 
     # ── a brand-new profile ───────────────────────────────────────────────
     if profile is None:
@@ -304,15 +351,9 @@ async def apply_profile(payload: ApplyProfileRequest):
             about=verdict.about or payload.about or "Untitled profile",
             profile_text=text,
         )
-        # A profile with no request would leave the request file blank, so give
-        # it one from whatever the user currently has.
-        carried_profile_t, carried_request_t = thresholds_of(current.get("request_id"))
-        request_obj = store.create_request(
-            created.profile_id, request_text_of(current.get("request_id")),
-            profile_threshold=carried_profile_t,
-            request_threshold=carried_request_t,
-        )
-        set_active(created.profile_id, request_obj.request_id)
+        # A new profile starts empty on purpose: the user should write the
+        # request they want now, not inherit one from whatever was active.
+        set_active(created.profile_id, None)
         logger.info("🌱 New profile %s created (about=%r)", created.profile_id, created.about)
         return {"status": "created", "saved": True, "profile": _summary(created),
                 "about": created.about}
@@ -331,15 +372,7 @@ async def apply_profile(payload: ApplyProfileRequest):
     created = store.create_profile(
         about=verdict.about or profile.about, profile_text=text
     )
-    carried_profile_t, carried_request_t = thresholds_of(
-        current.get("request_id")
-    )
-    request_obj = store.create_request(
-        created.profile_id, _active_request_text(profile.profile_id),
-        profile_threshold=carried_profile_t,
-        request_threshold=carried_request_t,
-    )
-    set_active(created.profile_id, request_obj.request_id)
+    set_active(created.profile_id, None)
     logger.info(
         "🌿 %s: new profile %s (%s) — %s",
         verdict.change, created.profile_id, created.about, verdict.explanation,
@@ -396,6 +429,7 @@ async def apply_request(payload: ApplyRequestRequest):
             profile_threshold=carried_profile_t,
             request_threshold=carried_request_t,
         )
+        set_active(payload.profile_id, created.request_id)
         return {"status": "created", "saved": True, "request": created.model_dump(mode="json")}
 
     verdict = await classify_request_change(existing.request_text, text)

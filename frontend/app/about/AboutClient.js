@@ -16,10 +16,21 @@ const CLASSIFY_DEBOUNCE_MS = 1200;
  * the edit stays inside the current profile or opens a new one, and why. A
  * structural change is never applied without them agreeing to it.
  */
-function ChangeBanner({ verdict, busy }) {
+function ChangeBanner({ verdict, busy, isNew }) {
   if (busy && !verdict) {
     return (
       <p className="text-xs text-muted-foreground">Reading your edit…</p>
+    );
+  }
+  if (isNew) {
+    return (
+      <div className="rounded-md border border-border/60 bg-muted/40 px-4 py-3 text-sm">
+        <p className="font-semibold text-foreground">New profile</p>
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+          This will be saved as a separate profile with its own requests, leads, and history.
+          Nothing existing is changed. It starts with no request — add one on Looking for.
+        </p>
+      </div>
     );
   }
   if (!verdict) return null;
@@ -98,7 +109,12 @@ export default function AboutClient() {
 
   // Load the editor whenever the selection changes.
   useEffect(() => {
-    if (!selected) return;
+    if (!selected) {
+      setDraft('');
+      setDirty(false);
+      setVerdict(null);
+      return;
+    }
     setDraft(selected.profile_text);
     setDirty(false);
     setVerdict(null);
@@ -106,7 +122,7 @@ export default function AboutClient() {
 
   // Debounced classification of whatever is currently typed.
   useEffect(() => {
-    if (!dirty || !draft.trim()) {
+    if (!selectedId || !dirty || !draft.trim()) {
       setVerdict(null);
       return undefined;
     }
@@ -200,6 +216,31 @@ export default function AboutClient() {
       await load();
       setSelectedId(profileId);
       setMessage({ tone: 'success', text: 'This profile is now the one searches run under.' });
+    } catch (error) {
+      setMessage({ tone: 'error', text: error.message });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const deleteProfile = async () => {
+    if (!selected) return;
+    const label = selected.about || 'this profile';
+    if (!window.confirm(
+      `Delete “${label}”? Its requests, leads, held and deferred ads, and rejections will be removed. This cannot be undone.`
+    )) {
+      return;
+    }
+    setBusy(true);
+    setMessage(null);
+    try {
+      const res = await fetch(`/api/profiles/${encodeURIComponent(selected.profile_id)}`, {
+        method: 'DELETE',
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || 'Could not delete profile');
+      await load();
+      setMessage({ tone: 'success', text: `Profile deleted: ${label}.` });
     } catch (error) {
       setMessage({ tone: 'error', text: error.message });
     } finally {
@@ -301,7 +342,7 @@ export default function AboutClient() {
                 className="w-full rounded-md border border-input bg-background p-4 text-sm leading-relaxed text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 focus:border-ring focus:ring-1 focus:ring-ring"
               />
 
-              <ChangeBanner verdict={verdict} busy={classifying} />
+              <ChangeBanner verdict={verdict} busy={classifying} isNew={!selectedId} />
 
               {message && (
                 <div
@@ -337,6 +378,11 @@ export default function AboutClient() {
                 {selected && selected.profile_id !== data?.active_profile_id && (
                   <Button variant="ghost" onClick={() => activate(selected.profile_id)} disabled={busy}>
                     Search under this profile
+                  </Button>
+                )}
+                {selected && (
+                  <Button variant="destructive" onClick={deleteProfile} disabled={busy}>
+                    Delete profile
                   </Button>
                 )}
                 {dirty && <span className="text-xs text-muted-foreground">Unsaved changes</span>}

@@ -130,6 +130,7 @@ export async function GET(request, { params }) {
       profile_about: live?.profile_about ?? null,
       profile_is_active: live?.profile_is_active ?? null,
       run_mode: live?.run_mode ?? null,
+      mode: live?.mode ?? null,
       note: live?.note ?? null,
       // Any requested keyword the run finished without searching. Reported
       // instead of swallowed: a run that quietly skips what you typed looks

@@ -582,15 +582,22 @@ export function RunDetail({ runId }) {
   const rejectedCount = rejected.length || run.counts?.rejected || 0;
   const aiFailedCount = aiFailed.length || run.counts?.ai_failed || 0;
   const isLive = !isTerminalStatus(status);
+  const isManual = run.mode === 'manual';
+  const awaitingVerdicts = run.phase === 'awaiting_verdicts';
   const resultsSaved = run.results_saved !== false;
   const keywordsWithAds = keywords.filter((entry) => (entry.accepted_count ?? 0) > 0).length;
 
   let emptyResults;
   if (isLive) {
-    emptyResults = {
-      message: 'Nothing accepted yet — the search is still running.',
-      hint: 'Accepted ads appear here as soon as they are judged.',
-    };
+    emptyResults = awaitingVerdicts
+      ? {
+          message: 'The scrape is finished. The assistant is judging these ads now.',
+          hint: 'Accepted ads appear here after the verdicts are applied.',
+        }
+      : {
+          message: 'Nothing accepted yet — the search is still running.',
+          hint: 'Accepted ads appear here as soon as they are judged.',
+        };
   } else if (!resultsSaved) {
     emptyResults = {
       message: 'The search finished, but no results file was saved for it.',
@@ -780,7 +787,7 @@ export function RunDetail({ runId }) {
         </div>
         <div className="flex items-center gap-3">
           <StatusLabel status={status} className="text-sm" />
-          {isLive && (
+          {isLive && !isManual && (
             <Button
               variant="outline"
               onClick={stopRun}
@@ -796,6 +803,13 @@ export function RunDetail({ runId }) {
       {stopError && (
         <div className="rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm font-medium text-destructive" role="alert">
           {stopError}
+        </div>
+      )}
+
+      {awaitingVerdicts && (
+        <div className="rounded-md border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground" role="status">
+          The scrape is finished. The assistant is judging these ads now; the results appear here
+          after the verdicts are applied.
         </div>
       )}
 
