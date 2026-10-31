@@ -28,6 +28,15 @@ export async function forward(request, path) {
       cache: 'no-store',
     });
     const text = await res.text();
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      // An unhandled backend error is plain text. Wrapping it keeps every
+      // caller's res.json() from failing with a JSON parse error.
+      return NextResponse.json(
+        { error: text.trim() || `Backend returned ${res.status}` },
+        { status: res.status }
+      );
+    }
     return new NextResponse(text, {
       status: res.status,
       headers: { 'Content-Type': 'application/json' },

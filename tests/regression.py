@@ -239,6 +239,42 @@ def test_judge():
         rel.AIClient = original
 
 
+def test_classifier_fallback():
+    print("\n[9i] profile edits save when the classifier is down")
+    import modules.profiles.classifier as clf
+    from core.utils.ai_utils import errors as ai_errors
+
+    class Down:
+        async def blocking(self, *args, **kwargs):
+            raise RuntimeError("402 RESOURCE_EXHAUSTED: prepayment credits depleted")
+
+    original = clf.AIClient
+    clf.AIClient = Down
+    try:
+        profile = asyncio.run(clf.classify_profile_change("old", "new"))
+        request = asyncio.run(clf.classify_request_change("old", "new"))
+    finally:
+        clf.AIClient = original
+
+    check("a profile edit degrades to in-place instead of failing",
+          profile.change == "none" and not profile.new_profile_required
+          and profile.degraded)
+    check("a request edit degrades to in-place instead of failing",
+          request.change == "none" and not request.new_profile_required
+          and request.degraded)
+
+    class FakeAPIError(Exception):
+        code = 402
+
+    original_api_error = ai_errors._APIError
+    ai_errors._APIError = FakeAPIError
+    try:
+        check("a depleted-credit 402 is not retried",
+              not ai_errors.is_retryable(FakeAPIError()))
+    finally:
+        ai_errors._APIError = original_api_error
+
+
 def test_manual_workflow():
     print("\n[9b] manual verdict file")
     import interface.manual as manual
@@ -2882,6 +2918,18 @@ def test_profile_lifecycle():
     api.classify_profile_change = fake_profile
     api.classify_request_change = fake_request
     try:
+        async def down_profile(current, edited):
+            raise RuntimeError("classifier down")
+
+        api.classify_profile_change = down_profile
+        no_ai = asyncio.run(api.apply_profile(
+            api.ApplyProfileRequest(text="Profile saved without the classifier")
+        ))
+        created_pids.append(no_ai["profile"]["profile_id"])
+        check("a new profile saves even when the classifier is down",
+              no_ai["status"] == "created")
+
+        api.classify_profile_change = fake_profile
         created = asyncio.run(api.apply_profile(
             api.ApplyProfileRequest(text="Regression lifecycle profile")
         ))
@@ -2993,6 +3041,13 @@ def test_profile_management_ui():
     fe = Path(__file__).resolve().parents[1] / "frontend"
     about = (fe / "app" / "about" / "AboutClient.js").read_text()
     looking = (fe / "app" / "looking-for" / "LookingForClient.js").read_text()
+    proxy = (fe / "app" / "api" / "profiles" / "route.js").read_text()
+
+    check("a plain-text backend error is wrapped as JSON",
+          "contentType.includes('application/json')" in proxy
+          and "text.trim()" in proxy)
+    check("a degraded classifier warning reaches the user",
+          "body.warning" in about and "body.warning" in looking)
 
     check("the About page can delete a profile",
           "Delete profile" in about and "method: 'DELETE'" in about)
@@ -3046,6 +3101,7 @@ def main():
     test_record_routing()
     test_filter()
     test_judge()
+    test_classifier_fallback()
     test_manual_workflow()
     test_manual_progress()
     test_agent_mode_ui()

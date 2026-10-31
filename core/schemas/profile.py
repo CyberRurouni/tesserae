@@ -48,6 +48,9 @@ class ProfileClassification(BaseModel):
     about: str = ""
     # Shown to the user when a new node is proposed. They decline => no save.
     explanation: str = ""
+    # True when the model could not be reached and the edit is being saved
+    # in place without a structural check.
+    degraded: bool = False
 
 
 class RequestClassification(BaseModel):
@@ -56,6 +59,9 @@ class RequestClassification(BaseModel):
     change: ChangeKind
     new_profile_required: bool
     explanation: str = ""
+    # True when the model could not be reached and the edit is being saved
+    # in place without a structural check.
+    degraded: bool = False
 
 
 class Profile(BaseModel):

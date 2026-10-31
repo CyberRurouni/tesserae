@@ -109,6 +109,12 @@ def _summary(profile: store.Profile) -> dict:
     }
 
 
+def _about_from_text(text: str) -> str:
+    """A readable fallback label when the classifier cannot name the profile."""
+    words = text.split()
+    return " ".join(words[:8])[:80] or "Untitled profile"
+
+
 # ── reads ───────────────────────────────────────────────────────────────────
 @router.get("")
 async def list_profiles():
@@ -320,6 +326,8 @@ async def classify_profile(payload: ClassifyProfileRequest):
         "new_profile_required": verdict.new_profile_required,
         "about": verdict.about,
         "explanation": verdict.explanation,
+        "degraded": bool(getattr(verdict, "degraded", False)),
+        "warning": verdict.explanation if getattr(verdict, "degraded", False) else "",
     }
 
 
@@ -346,9 +354,11 @@ async def apply_profile(payload: ApplyProfileRequest):
 
     # ── a brand-new profile ───────────────────────────────────────────────
     if profile is None:
-        verdict = await classify_profile_change("", text)
+        # There is nothing to compare against, so the classifier is only a
+        # naming aid. A model outage must not stop the first profile from
+        # being saved.
         created = store.create_profile(
-            about=verdict.about or payload.about or "Untitled profile",
+            about=payload.about or _about_from_text(text),
             profile_text=text,
         )
         # A new profile starts empty on purpose: the user should write the
@@ -366,7 +376,10 @@ async def apply_profile(payload: ApplyProfileRequest):
         if verdict.about:
             profile.about = verdict.about
         store.save_profile(profile)
-        return {"status": "updated", "saved": True, "profile": _summary(profile)}
+        response = {"status": "updated", "saved": True, "profile": _summary(profile)}
+        if getattr(verdict, "degraded", False):
+            response["warning"] = verdict.explanation
+        return response
 
     # ── structural: a new profile with clean per-profile state ─────────────
     created = store.create_profile(
@@ -395,6 +408,8 @@ async def classify_request(payload: ClassifyRequestRequest):
         "change": verdict.change,
         "new_profile_required": verdict.new_profile_required,
         "explanation": verdict.explanation,
+        "degraded": bool(getattr(verdict, "degraded", False)),
+        "warning": verdict.explanation if getattr(verdict, "degraded", False) else "",
     }
 
 
@@ -436,8 +451,15 @@ async def apply_request(payload: ApplyRequestRequest):
     if not verdict.new_profile_required:
         existing.request_text = text
         store.save_request(existing)
-        return {"status": "updated", "saved": True,
-                "request": existing.model_dump(mode="json"), "change": verdict.change}
+        response = {
+            "status": "updated",
+            "saved": True,
+            "request": existing.model_dump(mode="json"),
+            "change": verdict.change,
+        }
+        if getattr(verdict, "degraded", False):
+            response["warning"] = verdict.explanation
+        return response
 
     created = store.create_request(
         payload.profile_id, text,

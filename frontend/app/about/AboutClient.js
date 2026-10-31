@@ -186,7 +186,8 @@ export default function AboutClient() {
       } else {
         text = 'Profile updated.';
       }
-      setMessage({ tone: 'success', text });
+      if (body.warning) text = `${text} ${body.warning}`;
+      setMessage({ tone: body.warning ? 'info' : 'success', text });
       await load();
       setSelectedId(body.profile?.profile_id ?? selectedId);
     } catch (error) {

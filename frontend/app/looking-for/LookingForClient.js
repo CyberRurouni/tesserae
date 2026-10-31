@@ -216,12 +216,13 @@ export default function LookingForClient() {
       }
       setDirty(false);
       setVerdict(null);
+      const savedText =
+        body.status === 'created'
+          ? 'New request saved and active.'
+          : 'Request updated.';
       setMessage({
-        tone: 'success',
-        text:
-          body.status === 'created'
-            ? 'New request saved and active.'
-            : 'Request updated.',
+        tone: body.warning ? 'info' : 'success',
+        text: body.warning ? `${savedText} ${body.warning}` : savedText,
       });
       await load();
       if (body.request?.request_id) setRequestId(body.request.request_id);

@@ -26,9 +26,10 @@ except ImportError:  # SDK missing — classification degrades to "always retry"
     _APIError = None
 
 # HTTP status codes that will fail the same way no matter how many times we
-# retry: bad/missing key, permission denied, unknown model/resource, malformed
-# request. Everything else (408, 429, 5xx, network errors) is transient.
-_NON_RETRYABLE_STATUS_CODES = {400, 401, 403, 404, 422}
+# retry: bad/missing key, payment required, permission denied, unknown
+# model/resource, malformed request. Everything else (408, 429, 5xx, network
+# errors) is transient.
+_NON_RETRYABLE_STATUS_CODES = {400, 401, 402, 403, 404, 422}
 
 
 def is_retryable(error: Exception) -> bool:

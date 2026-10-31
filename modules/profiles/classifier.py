@@ -29,6 +29,11 @@ from core import (
 
 logger = logging.getLogger(__name__)
 
+_CLASSIFIER_DOWN = (
+    "The AI classifier is unavailable, so this edit will be saved in place "
+    "without a structural check."
+)
+
 
 def _json_hint(shape: str) -> str:
     return f"Answer with JSON only, shaped exactly like: {shape}"
@@ -81,20 +86,29 @@ new_profile_required is true for "narrowing" and "widening", false for "none".
 
 async def classify_profile_change(current_text: str, edited_text: str) -> ProfileClassification:
     client = AIClient()
-    raw = await client.blocking(
-        [
-            {"role": "system", "content": _PROFILE_SYSTEM},
-            {
-                "role": "user",
-                "content": (
-                    f"CURRENT PROFILE TEXT:\n{current_text or '(empty — new profile)'}\n\n"
-                    f"EDITED TEXT:\n{edited_text or '(empty)'}"
-                ),
-            },
-        ],
-        max_tokens=700,
-        temperature=0.0,  # a classification, not a creative act
-    )
+    try:
+        raw = await client.blocking(
+            [
+                {"role": "system", "content": _PROFILE_SYSTEM},
+                {
+                    "role": "user",
+                    "content": (
+                        f"CURRENT PROFILE TEXT:\n{current_text or '(empty — new profile)'}\n\n"
+                        f"EDITED TEXT:\n{edited_text or '(empty)'}"
+                    ),
+                },
+            ],
+            max_tokens=700,
+            temperature=0.0,  # a classification, not a creative act
+        )
+    except Exception as exc:  # noqa: BLE001 - saving must not depend on the model
+        logger.warning("Profile classifier unavailable — saving in place: %s", exc)
+        return ProfileClassification(
+            change="none",
+            new_profile_required=False,
+            explanation=_CLASSIFIER_DOWN,
+            degraded=True,
+        )
 
     result = ProfileClassification(
         change=raw.get("change") or "none",
@@ -144,20 +158,30 @@ new_profile_required is true for "narrowing" and "widening", false for "none".
 
 async def classify_request_change(current_text: str, edited_text: str) -> RequestClassification:
     client = AIClient()
-    raw = await client.blocking(
-        [
-            {"role": "system", "content": _REQUEST_SYSTEM},
-            {
-                "role": "user",
-                "content": (
-                    f"CURRENT REQUEST:\n{current_text or '(empty — new request)'}\n\n"
-                    f"EDITED REQUEST:\n{edited_text or '(empty)'}"
-                ),
-            },
-        ],
-        max_tokens=500,
-        temperature=0.0,
-    )
+    try:
+        raw = await client.blocking(
+            [
+                {"role": "system", "content": _REQUEST_SYSTEM},
+                {
+                    "role": "user",
+                    "content": (
+                        f"CURRENT REQUEST:\n{current_text or '(empty — new request)'}\n\n"
+                        f"EDITED REQUEST:\n{edited_text or '(empty)'}"
+                    ),
+                },
+            ],
+            max_tokens=500,
+            temperature=0.0,
+        )
+    except Exception as exc:  # noqa: BLE001 - saving must not depend on the model
+        logger.warning("Request classifier unavailable — saving in place: %s", exc)
+        return RequestClassification(
+            change="none",
+            new_profile_required=False,
+            explanation=_CLASSIFIER_DOWN,
+            degraded=True,
+        )
+
     result = RequestClassification(
         change=raw.get("change") or "none",
         new_profile_required=bool(raw.get("new_profile_required")),
