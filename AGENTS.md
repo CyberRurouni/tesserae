@@ -19,6 +19,17 @@ Run the scrape only when the user asks for it. "Run the script" means the whole
 cycle: scrape, judge every pending ad, apply, then report the run path, counts,
 and `/runs/<run_id>`. Do not hand the user a UI workflow.
 
+### Choose keywords first
+
+Before any scrape, propose **10–12 keywords** and ask the user to approve them.
+Do not start scraping until the user has decided the final list. Keep each cycle
+to 10–12 keywords; never propose 18+.
+
+Use broad keywords, or specific ones only when the active profile names that
+tool/stack. Do not introduce tools the profile does not mention (for example
+`n8n`, `make.com`, or `Django`). This keeps sourcing aligned with work the user
+can credibly claim. Once the keywords are approved, run the scrape.
+
 ```bash
 python3 -m interface.manual scrape
 ```
@@ -29,8 +40,12 @@ Useful options:
 python3 -m interface.manual scrape --keywords '["python developer", "backend"]'
 python3 -m interface.manual scrape --max-ads-per-keyword 300
 python3 -m interface.manual scrape --profile-id <profile_id> --request-id <request_id>
-python3 -m interface.manual scrape --parallel-workers 2
+python3 -m interface.manual scrape --parallel-workers 3
 ```
+
+**Current operator setting (2026-10-31): always pass `--parallel-workers 3`
+when running a scrape unless the user says otherwise.** The code default remains
+`1`; this is an operating preference, not a default change.
 
 The scrape uses the last saved search filters when no options are given. Options
 passed to the CLI also become the saved selection, so the Search page shows them
@@ -215,3 +230,11 @@ playbook rather than defending the previous verdict.
 - 2026-10-28 — The assistant runs the full scrape → judge → apply cycle from the
   CLI. The frontend is the results viewer; the user does not need to start runs
   from the UI.
+- 2026-10-31 — Current scrape parallelism is 3 workers. Pass
+  `--parallel-workers 3` on every scrape unless the user changes it. The code
+  default stays `1`.
+- 2026-11-08 — Keyword-first workflow is mandatory: propose 10–12 keywords,
+  wait for the user's final list, then scrape. Never propose 12+ per cycle.
+  Prefer broad keywords; use specific tools only when the profile names them.
+  Ads that mention an unlisted tool can still be accepted during judging if
+  they match the profile and request.

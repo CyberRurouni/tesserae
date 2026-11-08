@@ -11,12 +11,21 @@
   ],
   "media_type": "all",
   "keywords": [
-    "AI engineers"
+    "Full Stack Developer",
+    "Backend Developer",
+    "AI automation Engineer",
+    "Chatbot developer",
+    "sales development representative",
+    "outbound sales representative",
+    "appointment setter",
+    "inside sales representative",
+    "lead generation specialist",
+    "customer success associate"
   ],
-  "custom_start_date": "2026-10-21",
-  "custom_end_date": "2026-10-28",
+  "custom_start_date": "2026-10-09",
+  "custom_end_date": "2026-11-08",
   "ad_age_hours": "720",
-  "max_ads_per_keyword": 30,
+  "max_ads_per_keyword": 1400,
   "delivered_to_regions": [
     "ALL"
   ],
